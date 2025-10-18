@@ -1,54 +1,29 @@
+
 if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
--- Load the Rayfield UI Library
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
-
--- Create the standalone window
-local Window = Rayfield:CreateWindow({
-    Name = "Index-Style Aimbot, Silent Aim, Combat & Desync System",
-    LoadingTitle = "Loading Complete System",
-    LoadingSubtitle = "Loading...",
-    ConfigurationSaving = {
-        Enabled = true,
-        FolderName = "IndexCombatSystem",
-        FileName = "Config"
-    },
-    KeySystem = false
-})
 
 -- Services
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
-local Workspace = game:GetService("Workspace")
 local Camera = workspace.CurrentCamera
-local LP = Players.LocalPlayer
-local Mouse = LP:GetMouse()
+local Workspace = game:GetService("Workspace")
 
--- Modules & Remotes (Combat System)
+-- Modules & Remotes
 local Remote = ReplicatedStorage:WaitForChild("Remote")
 local GunHandler = require(ReplicatedStorage.Modules.Guns.GunHandler)
 local Configuration = require(ReplicatedStorage.Modules.Guns.Configuration)
 local RemoteFunction = require(ReplicatedStorage.RemoteFunction)
 local Controller = require(ReplicatedStorage.Modules.Controller)
 
--- Local Player Root
-local Root = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-
--- Create tabs
-local MainTab = Window:CreateTab("Main", nil)
-local CombatTab = Window:CreateTab("Combat", nil)
-local DesyncTab = Window:CreateTab("Desync", nil)
-local MenuTab = Window:CreateTab("Menu", nil)
-local ShopTab = Window:CreateTab("Shop", nil)
-
--- ==================================================
--- DESYNC SYSTEM VARIABLES
--- ==================================================
+-- Local Player
+local LP = Players.LocalPlayer
+local Root = LP.Character and (LP.Character:FindFirstChild("HumanoidRootPart") or LP.Character.HumanoidRootPart)
 
 -- Desync Variables
 getgenv().Desync = {
@@ -159,8 +134,394 @@ local VoidSpamMethods = {
 }
 
 -- ==================================================
--- DESYNC FUNCTIONS
+-- BULLET TP SYSTEM (RAGE MODE)
 -- ==================================================
+getgenv().BTP = getgenv().BTP or {
+    Enabled = false,
+    Mode = "FOV", -- FOV | Target
+    Prediction = 0.14,
+    Part = "UpperTorso",
+    ClosestPart = false,
+    FOV = 150,
+    ShowFOV = false,
+    ShowTracer = false,
+    TracerColor = Color3.fromRGB(255,255,255),
+    TracerThickness = 2,
+    SwapScale = 1.4,
+    SwapMin = 0.35,
+    SwapMax = 0.75,
+}
+
+-- Bullet Rage TP Configuration
+getgenv().BulletRageTP = {
+    Enabled = false,
+    Prediction = 0.14,
+    ClosestPart = false,
+    SwapScale = 1.4,
+    SwapMin = 0.35,
+    SwapMax = 0.75,
+}
+
+-- State Variables for Bullet Rage TP
+local rapidEnabled = false
+local lastFireTime = 0
+local lastSwapTime = 0
+local swapping = false
+local currentTarget = nil
+local FIRE_COOLDOWN = 0.22
+
+local function BTP_notify(t,d) 
+    StarterGui:SetCore("SendNotification",{Title="Bullet TP",Text=t,Duration=d or 1.2}) 
+end
+
+-- BTP Drawing
+local BTP_circle = Drawing.new("Circle")
+BTP_circle.Filled = false
+BTP_circle.NumSides = 64
+BTP_circle.Color = Color3.fromRGB(255,0,0)
+BTP_circle.Thickness = 1
+BTP_circle.Transparency = 1
+BTP_circle.Visible = false
+
+local BTP_tracer = Drawing.new("Line")
+BTP_tracer.Visible = false
+
+local BTP_HL = Instance.new("Highlight")
+BTP_HL.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+BTP_HL.FillColor = Color3.fromRGB(255,0,0)
+BTP_HL.OutlineColor = Color3.fromRGB(0,0,0)
+BTP_HL.FillTransparency = 0.4
+BTP_HL.OutlineTransparency = 0
+BTP_HL.Enabled = true
+BTP_HL.Parent = game:GetService("CoreGui")
+
+-- BTP Helper Functions
+local function BTP_alive(plr)
+    local c = plr and plr.Character
+    local h = c and c:FindFirstChildOfClass("Humanoid")
+    if not (h and h.Health > 0) then return false end
+    local st = c and c:FindFirstChild("State")
+    if st and st:FindFirstChild("Down") and st.Down.Value then return false end
+    if c and c:FindFirstChild("ForceField") then return false end
+    return true
+end
+
+local function BTP_aimPart(plr)
+    if not BTP_alive(plr) then return nil end
+    local c = plr.Character
+    if getgenv().BTP.ClosestPart then
+        local best, mag = nil, math.huge
+        local m = UserInputService:GetMouseLocation()
+        for _,p in ipairs(c:GetChildren()) do
+            if p:IsA("BasePart") then
+                local v,on = Camera:WorldToViewportPoint(p.Position)
+                if on then
+                    local d = (Vector2.new(v.X,v.Y)-m).Magnitude
+                    if d < mag then best,mag = p,d end
+                end
+            end
+        end
+        return best
+    end
+    return c:FindFirstChild(getgenv().BTP.Part) or c:FindFirstChild("HumanoidRootPart") or c:FindFirstChild("Head")
+end
+
+local function BTP_targetFOV()
+    local m = UserInputService:GetMouseLocation()
+    local best, dmin = nil, math.huge
+    for _,pl in ipairs(Players:GetPlayers()) do
+        if pl ~= LP and BTP_alive(pl) and pl.Character then
+            local hrp = pl.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local v,on = Camera:WorldToViewportPoint(hrp.Position)
+                if on then
+                    local d = (Vector2.new(v.X,v.Y)-m).Magnitude
+                    if d <= getgenv().BTP.FOV and d < dmin then best,dmin = pl,d end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function BTP_currentTarget()
+    if getgenv().BTP.Mode == "Target" and getgenv().BTP_lockedTarget and BTP_alive(getgenv().BTP_lockedTarget) then 
+        return getgenv().BTP_lockedTarget 
+    end
+    return BTP_targetFOV()
+end
+
+local function BTP_gripFrom(handCF, targetCF)
+    local origin = handCF * CFrame.new(0,-1,0, 1,0,0, 0,0,1, 0,-1,0)
+    return origin:ToObjectSpace(targetCF):Inverse()
+end
+
+local function BTP_canShoot(char)
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local tool = char:FindFirstChildWhichIsA("Tool")
+    return hum and hum.Health > 0 and tool and tool:FindFirstChild("Handle")
+end
+
+local BTP_lastSwap, BTP_swapping = 0, false
+local function BTP_doBTP(tool)
+    if not getgenv().BTP.Enabled or BTP_swapping then return end
+    local char = LP.Character
+    if not (tool and tool:IsA("Tool") and tool:FindFirstChild("Handle") and BTP_canShoot(char)) then return end
+    
+    local tgtPlr = BTP_currentTarget()
+    local part = tgtPlr and BTP_aimPart(tgtPlr) or nil
+    if not part then return end
+
+    local vel = part.AssemblyLinearVelocity or part.Velocity or Vector3.zero
+    local endpoint = part.Position + vel * getgenv().BTP.Prediction
+    local offset = -Camera.CFrame.LookVector * 0.2
+    local targetCF = CFrame.new(endpoint + offset, endpoint + Camera.CFrame.LookVector)
+    local hand = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm"); if not hand then return end
+
+    local base = (Configuration and Configuration[tool.Name] and Configuration[tool.Name].Cooldown) or 0.45
+    local cd = math.clamp(base * getgenv().BTP.SwapScale, getgenv().BTP.SwapMin, getgenv().BTP.SwapMax)
+    if tick() - BTP_lastSwap < cd then return end
+
+    local saved = tool.Grip
+    local newGrip = BTP_gripFrom(hand.CFrame, targetCF)
+    local backpack = LP:FindFirstChild("Backpack") or LP:FindFirstChildOfClass("Backpack"); if not backpack then return end
+
+    BTP_swapping = true
+    tool.Parent = backpack; tool.Grip = newGrip; tool.Parent = char
+    RunService.RenderStepped:Wait()
+    tool.Parent = backpack; tool.Grip = saved; tool.Parent = char
+    BTP_lastSwap = tick()
+    BTP_swapping = false
+end
+
+local BTP_hooked = setmetatable({}, {__mode='k'})
+local function BTP_hookTool(tool)
+    if BTP_hooked[tool] or not tool:IsA("Tool") or not tool:FindFirstChild("Handle") then return end
+    BTP_hooked[tool] = true
+    tool.Activated:Connect(function() pcall(BTP_doBTP, tool) end)
+end
+
+local function BTP_scan(char)
+    for _,v in ipairs(char:GetChildren()) do if v:IsA("Tool") then BTP_hookTool(v) end end
+    char.ChildAdded:Connect(function(ch) if ch:IsA("Tool") then BTP_hookTool(ch) end end)
+end
+
+-- ==================================================
+-- BULLET RAGE TP FUNCTIONS (KILL ALL STYLE)
+-- ==================================================
+local function GetRealWorldPos(OriginCF, TargetCF)
+    local ActualOrigin = OriginCF * CFrame.new(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, -1, 0)
+    return ActualOrigin:ToObjectSpace(TargetCF):Inverse()
+end
+
+local function alive(plr)
+    local c = plr and plr.Character
+    local h = c and c:FindFirstChildOfClass("Humanoid")
+    local state = c and c:FindFirstChild("State")
+    if not h or not state then return false end
+    return h and h.Health > 0 and h:GetState() ~= Enum.HumanoidStateType.Dead and (not state:FindFirstChild("Down") or state.Down.Value == false)
+end
+
+local function isFullyLoaded(player)
+    if not player.Character then return false end
+    local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+    local humanoid = player.Character:FindFirstChild("Humanoid")
+    local state = player.Character:FindFirstChild("State")
+    if not hrp or not humanoid or not state then return false end
+    if hrp.AssemblyLinearVelocity.Magnitude > 1000 then return false end
+    return player.Character:FindFirstChild("FULLY_LOADED_CHAR")
+end
+
+local function canShoot(char)
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+    local st = char:FindFirstChild("State")
+    if not st then return false end
+    local tool = char:FindFirstChildWhichIsA("Tool")
+    if not tool or not tool:FindFirstChild("Handle") then return false end
+    if not (tool:FindFirstChild("Ammo") or tool:FindFirstChild("Ammo_CLIENT")) then return false end
+    if not char:FindFirstChild("FULLY_LOADED_CHAR") then return false end
+    if st:FindFirstChild("Down") and st.Down.Value then return false end
+    if st:FindFirstChild("Carried") and st.Carried.Value ~= nil then return false end
+    if char:FindFirstChild("CARRY_WELD") then return false end
+    return true
+end
+
+local function doBulletTP(tool, targetPart)
+    local char = LP.Character
+    if not canShoot(char) then return end
+    if not targetPart then return end
+
+    local endpoint = targetPart.Position + (targetPart.AssemblyLinearVelocity or targetPart.Velocity) * getgenv().BulletRageTP.Prediction
+    local offset = -Camera.CFrame.LookVector * 0.2
+    local targetCF = CFrame.new(endpoint + offset, endpoint + Camera.CFrame.LookVector)
+    local hand = (char and (char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")))
+    if not hand then return end
+
+    local cfg = Configuration[tool.Name]
+    local cd = rapidEnabled and 0.01 or (cfg and cfg.Cooldown and math.clamp(cfg.Cooldown * getgenv().BulletRageTP.SwapScale, getgenv().BulletRageTP.SwapMin, getgenv().BulletRageTP.SwapMax)) or 0.45
+    if time() - lastSwapTime < cd then return end
+
+    local saved = tool.Grip
+    local new = GetRealWorldPos(hand.CFrame, targetCF)
+    local backpack = LP:FindFirstChildOfClass("Backpack") or LP:FindFirstChild("Backpack")
+    if not backpack then return end
+
+    swapping = true -- Set flag to prevent re-entry
+    tool.Parent = backpack
+    tool.Grip = new
+    tool.Parent = char
+    lastSwapTime = time()
+
+    -- Wait a brief moment for the swap to take effect
+    RunService.Heartbeat:Wait()
+
+    -- Fire after TP
+    local handle = tool:FindFirstChild("Handle")
+    local ammo = tool:FindFirstChild("Ammo_CLIENT")
+    if ammo then ammo.Value = math.huge end
+
+    local MainEvent = ReplicatedStorage:FindFirstChild("MainEvent")
+    if MainEvent then
+        pcall(function()
+            MainEvent:FireServer("Shoot", tool, handle.CFrame.LookVector * 1000)
+        end)
+    end
+
+    pcall(function()
+        Remote:FireServer("ShootingNoAmmo", tool)
+    end)
+
+    local startPos = handle.Position
+
+    if tool.Name == "Double Barrel" then
+        for i = 1, 4 do
+            local spreadOffset = Vector3.new(
+                math.random(-20, 20) / 100,
+                math.random(-20, 20) / 100,
+                math.random(-20, 20) / 100
+            )
+            local spreadTarget = targetPart.Position + spreadOffset
+            GunHandler.Raycast(LP, startPos, spreadTarget, tool)
+        end
+    else
+        GunHandler.Raycast(LP, startPos, targetPart.Position, tool)
+    end
+
+    RemoteFunction.InvokeClient(char, LP, "Aim", startPos)
+
+    -- Restore after a short delay
+    local restoreDelay = rapidEnabled and 0.01 or 0.05
+    task.delay(restoreDelay, function()
+        if tool and tool.Parent == char then
+            tool.Parent = backpack
+            tool.Grip = saved
+            tool.Parent = char
+        end
+        swapping = false
+    end)
+end
+
+local function getTargetPart(targetChar)
+    if getgenv().BulletRageTP.ClosestPart then
+        local best, mag = nil, math.huge
+        local m = UserInputService:GetMouseLocation()
+        for _,p in ipairs(targetChar:GetChildren()) do
+            if p:IsA("BasePart") then
+                local v,on = Camera:WorldToViewportPoint(p.Position)
+                if on then
+                    local d = (Vector2.new(v.X,v.Y)-m).Magnitude
+                    if d < mag then best,mag = p,d end
+                end
+            end
+        end
+        return best
+    end
+    return targetChar:FindFirstChild("HumanoidRootPart") or targetChar:FindFirstChild("UpperTorso") or targetChar:FindFirstChild("Head")
+end
+
+local function findClosestValidTarget()
+    local closest, minDist = nil, math.huge
+    local myRoot = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil end
+
+    for _, target in ipairs(Players:GetPlayers()) do
+        if target ~= LP and alive(target) and isFullyLoaded(target) then
+            local targetRoot = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+            if targetRoot then
+                local dist = (targetRoot.Position - myRoot.Position).Magnitude
+                if dist < minDist then
+                    minDist, closest = dist, target
+                end
+            end
+        end
+    end
+    return closest
+end
+
+-- Bullet Rage TP Loop
+RunService.RenderStepped:Connect(function(delta)
+    if not rapidEnabled or not LP.Character then return end
+
+    local tool = LP.Character:FindFirstChildOfClass("Tool")
+    if not tool or not tool:FindFirstChild("Ammo_CLIENT") then return end
+
+    local now = time()
+
+    -- Find the absolute closest valid target for maximum aggression
+    currentTarget = findClosestValidTarget()
+
+    if not currentTarget then return end
+
+    -- Fire at the current target if cooldown is met
+    if currentTarget and not swapping and (now - lastFireTime >= FIRE_COOLDOWN) then
+        lastFireTime = now
+        
+        local targetChar = currentTarget.Character
+        if targetChar and alive(currentTarget) and isFullyLoaded(currentTarget) then
+            local targetPart = getTargetPart(targetChar)
+            if targetPart then
+                pcall(doBulletTP, tool, targetPart)
+            end
+        end
+
+        -- Immediately check if the target was killed to allow for a faster switch
+        if not alive(currentTarget) then
+            currentTarget = nil
+        end
+    end
+end)
+
+-- Initialize BTP
+if LP.Character then BTP_scan(LP.Character) end
+LP.CharacterAdded:Connect(BTP_scan)
+
+-- BTP Visuals Loop
+RunService.RenderStepped:Connect(function()
+    local m = UserInputService:GetMouseLocation()
+    local t = BTP_currentTarget()
+    local part = t and BTP_aimPart(t) or nil
+
+    if part and getgenv().BTP.Enabled then
+        BTP_HL.Adornee = part.Parent
+        BTP_HL.Enabled = true
+        if getgenv().BTP.ShowTracer then
+            local v,on = Camera:WorldToViewportPoint(part.Position)
+            if on then
+                BTP_tracer.From, BTP_tracer.To, BTP_tracer.Thickness, BTP_tracer.Color, BTP_tracer.Visible = m, Vector2.new(v.X, v.Y), getgenv().BTP.TracerThickness, getgenv().BTP.TracerColor, true
+            else
+                BTP_tracer.Visible = false
+            end
+        else
+            BTP_tracer.Visible = false
+        end
+    else
+        BTP_HL.Enabled, BTP_HL.Adornee, BTP_tracer.Visible = false, nil, false
+    end
+    BTP_circle.Position, BTP_circle.Radius, BTP_circle.Visible = m, getgenv().BTP.FOV, getgenv().BTP.Enabled and getgenv().BTP.ShowFOV
+end)
 
 local function LocalTriggerDesyncOnce()
     local LocalCharacter = LP.Character
@@ -307,153 +668,6 @@ OriginalVoidCFrameHook = hookmetamethod(game, "__index", newcclosure(function(Se
     return OriginalVoidCFrameHook(Self, Key)
 end))
 
--- ==================================================
--- DESYNC TAB UI ELEMENTS
--- ==================================================
-
-local DesyncSection = DesyncTab:CreateSection("Standard Desync")
-
-local DesyncToggle = DesyncTab:CreateToggle({
-    Name = "Desync",
-    CurrentValue = false,
-    Flag = "DesyncToggle",
-    Callback = function(Value)
-        getgenv().Desync.Enabled = Value
-        StarterGui:SetCore("SendNotification", {Title = "Desync", Text = Value and "Enabled" or "Disabled", Duration = 3})
-    end,
-})
-
-local DesyncKeybind = DesyncTab:CreateKeybind({
-    Name = "Desync Keybind",
-    CurrentKeybind = "Z",
-    HoldToInteract = false,
-    Flag = "DesyncKeybind",
-    Callback = function(Keybind)
-        -- Toggle desync on keybind
-        local current = DesyncToggle:Get()
-        DesyncToggle:Set(not current)
-    end,
-})
-
-local DesyncMethodDropdown = DesyncTab:CreateDropdown({
-    Name = "Desync Method",
-    Options = {"Void", "Sky", "Underground", "Random", "Oscillate", "Spin"},
-    CurrentOption = {"Void"},
-    Flag = "DesyncMethodDropdown",
-    Callback = function(Option)
-        getgenv().Desync.Method = Option[1]
-    end,
-})
-
--- Auto Desync on Damage Toggle
-local AutoDesyncToggle = DesyncTab:CreateToggle({
-    Name = "Auto Desync on Damage",
-    CurrentValue = true,
-    Flag = "AutoDesyncToggle",
-    Callback = function(Value)
-        getgenv().Desync.AutoDesyncOnDamage = Value
-    end,
-})
-
--- Health Threshold Slider
-local DesyncHealthThresholdSlider = DesyncTab:CreateSlider({
-    Name = "Health Threshold (%)",
-    Range = {1, 100},
-    Increment = 1,
-    Suffix = "%",
-    CurrentValue = 90,
-    Flag = "DesyncHealthThresholdSlider",
-    Callback = function(Value)
-        getgenv().Desync.HealthThreshold = Value
-    end,
-})
-
--- Cooldown Slider
-local DesyncCooldownSlider = DesyncTab:CreateSlider({
-    Name = "Desync Cooldown (s)",
-    Range = {0.1, 5},
-    Increment = 0.1,
-    Suffix = "s",
-    CurrentValue = 1,
-    Flag = "DesyncCooldownSlider",
-    Callback = function(Value)
-        getgenv().Desync.Cooldown = Value
-    end,
-})
-
--- Void Spam Section
-local VoidSpamSection = DesyncTab:CreateSection("Void Spam Desync")
-
-local VoidSpamToggle = DesyncTab:CreateToggle({
-    Name = "Void Spam",
-    CurrentValue = false,
-    Flag = "VoidSpamToggle",
-    Callback = function(Value)
-        getgenv().VoidSpam.Enabled = Value
-        if not getgenv().VoidSpam.Enabled then
-            ShouldInVoid = false
-        end
-        StarterGui:SetCore("SendNotification", {
-            Title = "Void Spam", 
-            Text = Value and "Enabled" or "Disabled", 
-            Duration = 3
-        })
-    end,
-})
-
-local VoidSpamKeybind = DesyncTab:CreateKeybind({
-    Name = "Void Spam Keybind",
-    CurrentKeybind = "X",
-    HoldToInteract = false,
-    Flag = "VoidSpamKeybind",
-    Callback = function(Keybind)
-        getgenv().VoidSpam.SpamKeybind = Enum.KeyCode[Keybind]
-        -- Toggle void spam on keybind press
-        local current = VoidSpamToggle:Get()
-        VoidSpamToggle:Set(not current)
-    end,
-})
-
-local VoidSpamMethodDropdown = DesyncTab:CreateDropdown({
-    Name = "Void Spam Method",
-    Options = {"Void", "Underworld", "Random", "Sky", "Nan"},
-    CurrentOption = {"Void"},
-    Flag = "VoidSpamMethodDropdown",
-    Callback = function(Option)
-        getgenv().VoidSpam.Method = Option[1]
-    end,
-})
-
-local VoidBreakVelocityToggle = DesyncTab:CreateToggle({
-    Name = "Break Velocity (Void Spam)",
-    CurrentValue = false,
-    Flag = "VoidBreakVelocityToggle",
-    Callback = function(Value)
-        getgenv().VoidSpam.BreakVelocity = Value
-        StarterGui:SetCore("SendNotification", {
-            Title = "Void Break Velocity", 
-            Text = Value and "Enabled" or "Disabled", 
-            Duration = 3
-        })
-    end,
-})
-
-local VoidBreakVelocityKeybind = DesyncTab:CreateKeybind({
-    Name = "Break Velocity Keybind",
-    CurrentKeybind = "N",
-    HoldToInteract = false,
-    Flag = "VoidBreakVelocityKeybind",
-    Callback = function(Keybind)
-        -- Toggle break velocity on keybind
-        local current = VoidBreakVelocityToggle:Get()
-        VoidBreakVelocityToggle:Set(not current)
-    end,
-})
-
--- ==================================================
--- COMBAT SYSTEM VARIABLES
--- ==================================================
-
 -- Kill All & Rapid Fire Variables
 local killAllEnabled = false
 local currentKillAllTarget = nil
@@ -471,15 +685,7 @@ local whitelist = {}
 local rapidBlacklist = {}
 local lastFiresAll = {}
 local allRapidKey = Enum.KeyCode.V
-local rapidFireRate = 20
-
--- Bullet Rage TP Variables
-local rapidEnabled = false
-local lastFireTime = 0
-local lastSwapTime = 0
-local swapping = false
-local currentTarget = nil
-local FIRE_COOLDOWN = 0.22
+local rapidFireRate = 20 -- 1 / fireCooldown for rate
 
 -- Anti Stomp Variables
 local antiStompEnabled = false
@@ -500,28 +706,20 @@ local noWalkCooldownEnabled = true
 -- Anti Mod
 local antiModEnabled = false
 local antiModTargetUserIds = {
-    9258752864, 8004978600, 434260279, 512673994,
-    3790051187, 2206944767, 416004704, 5352019249,
-    1487697276, 9258782554
+    9258752864, -- Original ID
+    8004978600,
+    434260279,
+    512673994,
+    3790051187,
+    2206944767,
+    416004704,
+    5352019249,
+    1487697276,
+    9258782554 -- New ID added
 }
 local antiModConnection = nil
 
--- Infinite Ammo
-local UNLIMITED_AMMO = 999999
-local originalRaycast = GunHandler.Raycast
-local infAmmoEnabled = false
-local heartbeatConn = nil
-local mainEvent = ReplicatedStorage:FindFirstChild("MainEvent")
-
--- Auto Armor Variables
-local autoArmorEnabled = false
-local autoArmorOnDamage = false
-local armorCooldown = false
-local armorPurchaseCooldown = 2
-local lastArmorPurchase = 0
-local healthThreshold = 50
-
--- Store original configuration values
+-- Store original configuration values for toggling
 local OriginalConfig = {}
 for _, data in pairs(Configuration) do
     if typeof(data) == "table" then
@@ -539,20 +737,7 @@ for _, data in pairs(Configuration) do
     end
 end
 
--- Bullet Rage TP Configuration
-getgenv().BulletRageTP = {
-    Enabled = false,
-    Prediction = 0.14,
-    ClosestPart = false,
-    SwapScale = 1.4,
-    SwapMin = 0.35,
-    SwapMax = 0.75,
-}
-
--- ==================================================
--- COMBAT HELPER FUNCTIONS
--- ==================================================
-
+-- Apply gun config based on toggles
 local function applyGunConfig()
     for key, data in pairs(Configuration) do
         if typeof(data) == "table" then
@@ -584,8 +769,9 @@ local function applyGunConfig()
     end
 end
 
-applyGunConfig()
+applyGunConfig() -- Apply initially
 
+-- Helper Functions
 local function isDowned(player)
     if not player.Character then return false end
     local state = player.Character:FindFirstChild("State")
@@ -619,7 +805,7 @@ local function isFullyLoaded(player)
     local state = player.Character:FindFirstChild("State")
     if not hrp or not humanoid or not state then return false end
     if hrp.AssemblyLinearVelocity.Magnitude > 1000 then return false end
-    return player.Character:FindFirstChild("FULLY_LOADED_CHAR") or true
+    return true
 end
 
 local function shouldTargetPlayer(player)
@@ -628,12 +814,14 @@ local function shouldTargetPlayer(player)
     local displayLower = player.DisplayName:lower()
     local isAllowed = true
 
+    -- Use doNotTargetList as a whitelist (players to ignore)
     for _, name in ipairs(doNotTargetList) do
         if nameLower:find(name:lower()) or displayLower:find(name:lower()) then
-            return false
+            return false -- If they are on the do not target list, immediately return false.
         end
     end
 
+    -- If targetOnlyList is populated, only target players on that list
     if #targetOnlyList > 0 then
         isAllowed = false
         for _, name in ipairs(targetOnlyList) do
@@ -697,29 +885,6 @@ local function ForceHit(tool, targetPlayer)
     Remote:FireServer("GunDamage", tool, targetChar, targetHum, 999, Vector3.zero, tool.Handle.Position, targetHRP.Position)
 end
 
-local function ShootAtTarget(tool, targetPlayer)
-    local char = LP.Character
-    local targetChar = targetPlayer.Character
-    if not tool or not tool:FindFirstChild("Handle") then return end
-    if not char or not targetChar then return end
-    local targetHum = targetChar:FindFirstChild("Humanoid")
-    local targetHRP = targetChar:FindFirstChild("HumanoidRootPart")
-    if not (targetHum and targetHRP and targetHum.Health > 0) then return end
-
-    Remote:FireServer("ShootingNoAmmo", tool)
-    if tool.Name == "Double Barrel" then
-        for i = 1, 4 do
-            local spreadOffset = Vector3.new(math.random(-20, 20) / 100, math.random(-20, 20) / 100, math.random(-20, 20) / 100)
-            local spreadTarget = targetHRP.Position + spreadOffset
-            GunHandler.Raycast(LP, tool.Handle.Position, spreadTarget, tool)
-        end
-    else
-        GunHandler.Raycast(LP, tool.Handle.Position, targetHRP.Position, tool)
-    end
-    RemoteFunction:InvokeClient(LP, "Aim", tool.Handle.Position)
-    Remote:FireServer("GunDamage", tool, targetChar, targetHum, 999, Vector3.zero, tool.Handle.Position, targetHRP.Position)
-end
-
 local function getActualBody(player)
     if not player or not player.Character then return nil end
     local lowestPart, lowestY = nil, math.huge
@@ -755,7 +920,36 @@ local function StompTarget(downedTargets)
     end
 end
 
--- Infinite Ammo Functions
+local function ShootAtTarget(tool, targetPlayer)
+    local char = LP.Character
+    local targetChar = targetPlayer.Character
+    if not tool or not tool:FindFirstChild("Handle") then return end
+    if not char or not targetChar then return end
+    local targetHum = targetChar:FindFirstChild("Humanoid")
+    local targetHRP = targetChar:FindFirstChild("HumanoidRootPart")
+    if not (targetHum and targetHRP and targetHum.Health > 0) then return end
+
+    Remote:FireServer("ShootingNoAmmo", tool)
+    if tool.Name == "Double Barrel" then
+        for i = 1, 4 do
+            local spreadOffset = Vector3.new(math.random(-20, 20) / 100, math.random(-20, 20) / 100, math.random(-20, 20) / 100)
+            local spreadTarget = targetHRP.Position + spreadOffset
+            GunHandler.Raycast(LP, tool.Handle.Position, spreadTarget, tool)
+        end
+    else
+        GunHandler.Raycast(LP, tool.Handle.Position, targetHRP.Position, tool)
+    end
+    RemoteFunction:InvokeClient(LP, "Aim", tool.Handle.Position)
+    Remote:FireServer("GunDamage", tool, targetChar, targetHum, 999, Vector3.zero, tool.Handle.Position, targetHRP.Position)
+end
+
+-- Infinite ammo implementation
+local UNLIMITED_AMMO = 999999
+local originalRaycast = GunHandler.Raycast
+local infAmmoEnabled = false
+local heartbeatConn = nil
+local mainEvent = ReplicatedStorage:FindFirstChild("MainEvent")
+
 local function patchAmmo(tool)
     if not tool then return end
     local ac = tool:FindFirstChild("Ammo_CLIENT")
@@ -768,6 +962,7 @@ local function enableInfAmmo()
     if infAmmoEnabled then return end
     infAmmoEnabled = true
 
+    -- wrap Raycast
     GunHandler.Raycast = function(self, startPos, endPos, tool, ...)
         pcall(patchAmmo, tool)
         if mainEvent then
@@ -781,6 +976,7 @@ local function enableInfAmmo()
         return originalRaycast(self, startPos, endPos, tool, ...)
     end
 
+    -- Heartbeat patch to keep ammo values patched on character/backpack tools
     heartbeatConn = RunService.Heartbeat:Connect(function()
         local char = LP.Character
         if char then
@@ -801,6 +997,7 @@ end
 local function disableInfAmmo()
     if not infAmmoEnabled then return end
     infAmmoEnabled = false
+    -- restore Raycast
     GunHandler.Raycast = originalRaycast
     if heartbeatConn then
         heartbeatConn:Disconnect()
@@ -808,15 +1005,20 @@ local function disableInfAmmo()
     end
 end
 
--- No Jump Cooldown Functions
+-- No Jump Cooldown Script
+local noJumpConnections = {}
+
 local function applyNoJumpCooldown(character)
-    if noJumpConnections[character] then return end
+    if noJumpConnections[character] then return end  -- Already applied
+
     local humanoid = character:WaitForChild("Humanoid")
+
     local conn = humanoid:GetPropertyChangedSignal("JumpPower"):Connect(function()
         if humanoid.JumpPower ~= 55 then
             humanoid.JumpPower = 55
         end
     end)
+
     noJumpConnections[character] = conn
 end
 
@@ -831,1249 +1033,14 @@ end
 local function antiMod_CheckPlayer(player)
     for _, id in ipairs(antiModTargetUserIds) do
         if player.UserId == id then
-            LP:Kick("A Moderator Joined")
+            LP:Kick("A Moderator Joined") -- The message shown when kicked
             return
         end
     end
 end
 
--- Bullet Rage TP Functions
-local function GetRealWorldPos(OriginCF, TargetCF)
-    local ActualOrigin = OriginCF * CFrame.new(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, -1, 0)
-    return ActualOrigin:ToObjectSpace(TargetCF):Inverse()
-end
-
-local function canShoot(char)
-    if not char then return false end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum or hum.Health <= 0 then return false end
-    local st = char:FindFirstChild("State")
-    if not st then return false end
-    local tool = char:FindFirstChildWhichIsA("Tool")
-    if not tool or not tool:FindFirstChild("Handle") then return false end
-    if not (tool:FindFirstChild("Ammo") or tool:FindFirstChild("Ammo_CLIENT")) then return false end
-    if st:FindFirstChild("Down") and st.Down.Value then return false end
-    if st:FindFirstChild("Carried") and st.Carried.Value ~= nil then return false end
-    if char:FindFirstChild("CARRY_WELD") then return false end
-    return true
-end
-
-local function getTargetPart(targetChar)
-    if getgenv().BulletRageTP.ClosestPart then
-        local best, mag = nil, math.huge
-        local m = UserInputService:GetMouseLocation()
-        for _,p in ipairs(targetChar:GetChildren()) do
-            if p:IsA("BasePart") then
-                local v,on = Camera:WorldToViewportPoint(p.Position)
-                if on then
-                    local d = (Vector2.new(v.X,v.Y)-m).Magnitude
-                    if d < mag then best,mag = p,d end
-                end
-            end
-        end
-        return best
-    end
-    return targetChar:FindFirstChild("HumanoidRootPart") or targetChar:FindFirstChild("UpperTorso") or targetChar:FindFirstChild("Head")
-end
-
-local function findClosestValidTarget()
-    local closest, minDist = nil, math.huge
-    local myRoot = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-    if not myRoot then return nil end
-
-    for _, target in ipairs(Players:GetPlayers()) do
-        if target ~= LP and isAlive(target) and isFullyLoaded(target) then
-            local targetRoot = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
-            if targetRoot then
-                local dist = (targetRoot.Position - myRoot.Position).Magnitude
-                if dist < minDist then
-                    minDist, closest = dist, target
-                end
-            end
-        end
-    end
-    return closest
-end
-
-local function doBulletTP(tool, targetPart)
-    local char = LP.Character
-    if not canShoot(char) then return end
-    if not targetPart then return end
-
-    local endpoint = targetPart.Position + (targetPart.AssemblyLinearVelocity or targetPart.Velocity) * getgenv().BulletRageTP.Prediction
-    local offset = -Camera.CFrame.LookVector * 0.2
-    local targetCF = CFrame.new(endpoint + offset, endpoint + Camera.CFrame.LookVector)
-    local hand = (char and (char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")))
-    if not hand then return end
-
-    local cfg = Configuration[tool.Name]
-    local cd = rapidEnabled and 0.01 or (cfg and cfg.Cooldown and math.clamp(cfg.Cooldown * getgenv().BulletRageTP.SwapScale, getgenv().BulletRageTP.SwapMin, getgenv().BulletRageTP.SwapMax)) or 0.45
-    if time() - lastSwapTime < cd then return end
-
-    local saved = tool.Grip
-    local new = GetRealWorldPos(hand.CFrame, targetCF)
-    local backpack = LP:FindFirstChildOfClass("Backpack") or LP:FindFirstChild("Backpack")
-    if not backpack then return end
-
-    swapping = true
-    tool.Parent = backpack
-    tool.Grip = new
-    tool.Parent = char
-    lastSwapTime = time()
-
-    RunService.Heartbeat:Wait()
-
-    local handle = tool:FindFirstChild("Handle")
-    local ammo = tool:FindFirstChild("Ammo_CLIENT")
-    if ammo then ammo.Value = math.huge end
-
-    local MainEvent = ReplicatedStorage:FindFirstChild("MainEvent")
-    if MainEvent then
-        pcall(function()
-            MainEvent:FireServer("Shoot", tool, handle.CFrame.LookVector * 1000)
-        end)
-    end
-
-    pcall(function()
-        Remote:FireServer("ShootingNoAmmo", tool)
-    end)
-
-    local startPos = handle.Position
-
-    if tool.Name == "Double Barrel" then
-        for i = 1, 4 do
-            local spreadOffset = Vector3.new(
-                math.random(-20, 20) / 100,
-                math.random(-20, 20) / 100,
-                math.random(-20, 20) / 100
-            )
-            local spreadTarget = targetPart.Position + spreadOffset
-            GunHandler.Raycast(LP, startPos, spreadTarget, tool)
-        end
-    else
-        GunHandler.Raycast(LP, startPos, targetPart.Position, tool)
-    end
-
-    RemoteFunction.InvokeClient(char, LP, "Aim", startPos)
-
-    local restoreDelay = rapidEnabled and 0.01 or 0.05
-    task.delay(restoreDelay, function()
-        if tool and tool.Parent == char then
-            tool.Parent = backpack
-            tool.Grip = saved
-            tool.Parent = char
-        end
-        swapping = false
-    end)
-end
-
--- ==================================================
--- ANTI STOMP LOOP (ORIGINAL CODE)
--- ==================================================
-coroutine.wrap(function()
-    while true do
-        task.wait()
-        if antiStompEnabled or autoAntiStomp or lagAntiStomp then
-            local LocalCharacter = LP.Character
-            local LocalRoot = LocalCharacter and LocalCharacter:FindFirstChild("HumanoidRootPart")
-            if LocalRoot then
-                local OldVelocity = LocalRoot.AssemblyLinearVelocity
-                LocalRoot.AssemblyLinearVelocity = Vector3.new(0, -9e10, 0)
-                RunService.RenderStepped:Wait()
-                LocalRoot.AssemblyLinearVelocity = OldVelocity
-            end
-        end
-        RunService.Heartbeat:Wait()
-    end
-end)()
-
--- ==================================================
--- COMBAT TAB UI ELEMENTS
--- ==================================================
-
-local CombatSection1 = CombatTab:CreateSection("Kill All & Rapid Fire")
-
-local KillAllToggle = CombatTab:CreateToggle({
-    Name = "Kill All",
-    CurrentValue = false,
-    Flag = "KillAllToggle",
-    Callback = function(Value)
-        killAllEnabled = Value
-        StarterGui:SetCore("SendNotification", {Title = "Kill All", Text = Value and "Enabled" or "Disabled", Duration = 3})
-    end,
-})
-
-local KillAllKeybind = CombatTab:CreateKeybind({
-    Name = "Kill All Keybind",
-    CurrentKeybind = "C",
-    HoldToInteract = false,
-    Flag = "KillAllKeybind",
-    Callback = function(Keybind)
-        killAllKey = Enum.KeyCode[Keybind]
-    end,
-})
-
-local RapidFireToggle = CombatTab:CreateToggle({
-    Name = "Rapid Fire All",
-    CurrentValue = false,
-    Flag = "RapidFireToggle",
-    Callback = function(Value)
-        allRapidEnabled = Value
-        StarterGui:SetCore("SendNotification", {Title = "Rapid Fire All", Text = Value and "Enabled" or "Disabled", Duration = 3})
-    end,
-})
-
-local RapidFireKeybind = CombatTab:CreateKeybind({
-    Name = "Rapid Fire All Keybind",
-    CurrentKeybind = "V",
-    HoldToInteract = false,
-    Flag = "RapidFireKeybind",
-    Callback = function(Keybind)
-        allRapidKey = Enum.KeyCode[Keybind]
-    end,
-})
-
-local BulletRageToggle = CombatTab:CreateToggle({
-    Name = "Bullet Rage TP (Kill All Style)",
-    CurrentValue = false,
-    Flag = "BulletRageToggle",
-    Callback = function(Value)
-        rapidEnabled = Value
-        StarterGui:SetCore("SendNotification", {Title = "Bullet Rage", Text = Value and "ON" or "OFF", Duration = 2})
-    end,
-})
-
-local BulletRageKeybind = CombatTab:CreateKeybind({
-    Name = "Bullet Rage Toggle Key",
-    CurrentKeybind = "F",
-    HoldToInteract = false,
-    Flag = "BulletRageKeybind",
-    Callback = function(Keybind)
-        BulletRageToggle:Set(not BulletRageToggle:Get())
-    end,
-})
-
-local FireRateSlider = CombatTab:CreateSlider({
-    Name = "Fire Rate (shots/sec)",
-    Range = {1, 60},
-    Increment = 1,
-    Suffix = "",
-    CurrentValue = 20,
-    Flag = "FireRateSlider",
-    Callback = function(Value)
-        rapidFireRate = Value
-        fireCooldown = 1 / Value
-    end,
-})
-
-local KillAllFireRateSlider = CombatTab:CreateSlider({
-    Name = "Kill All Fire Rate",
-    Range = {0.01, 0.5},
-    Increment = 0.01,
-    Suffix = "s",
-    CurrentValue = 0.05,
-    Flag = "KillAllFireRateSlider",
-    Callback = function(Value)
-        fireCooldown = Value
-    end,
-})
-
-local CircleRadiusSlider = CombatTab:CreateSlider({
-    Name = "Circle Radius",
-    Range = {5, 50},
-    Increment = 1,
-    Suffix = "studs",
-    CurrentValue = 10,
-    Flag = "CircleRadiusSlider",
-    Callback = function(Value)
-        radius = Value
-    end,
-})
-
-local CircleSpeedSlider = CombatTab:CreateSlider({
-    Name = "Circle Speed",
-    Range = {0.01, 1},
-    Increment = 0.01,
-    Suffix = "",
-    CurrentValue = 0.1,
-    Flag = "CircleSpeedSlider",
-    Callback = function(Value)
-        speed = Value
-    end,
-})
-
-local BulletRagePredictionSlider = CombatTab:CreateSlider({
-    Name = "Bullet Rage Prediction",
-    Range = {0, 0.5},
-    Increment = 0.01,
-    Suffix = "s",
-    CurrentValue = 0.14,
-    Flag = "BulletRagePredictionSlider",
-    Callback = function(Value)
-        getgenv().BulletRageTP.Prediction = Value
-    end,
-})
-
-local BulletRageFireRateSlider = CombatTab:CreateSlider({
-    Name = "Bullet Rage Fire Rate",
-    Range = {0.05, 1.0},
-    Increment = 0.01,
-    Suffix = "s",
-    CurrentValue = 0.22,
-    Flag = "BulletRageFireRateSlider",
-    Callback = function(Value)
-        FIRE_COOLDOWN = Value
-    end,
-})
-
-local CombatSection2 = CombatTab:CreateSection("Gun Modifications")
-
-local InfAmmoToggle = CombatTab:CreateToggle({
-    Name = "Inf Ammo",
-    CurrentValue = false,
-    Flag = "InfAmmoToggle",
-    Callback = function(Value)
-        if Value then
-            enableInfAmmo()
-            StarterGui:SetCore("SendNotification", {Title = "Inf Ammo", Text = "Enabled", Duration = 3})
-        else
-            disableInfAmmo()
-            StarterGui:SetCore("SendNotification", {Title = "Inf Ammo", Text = "Disabled", Duration = 3})
-        end
-    end,
-})
-
-local NoShootingCooldownToggle = CombatTab:CreateToggle({
-    Name = "No Shooting Cooldown",
-    CurrentValue = true,
-    Flag = "NoShootingCooldownToggle",
-    Callback = function(Value)
-        noShootingCooldownEnabled = Value
-        applyGunConfig()
-        StarterGui:SetCore("SendNotification", {Title = "No Shooting Cooldown", Text = Value and "Enabled" or "Disabled", Duration = 3})
-    end,
-})
-
-local NoWalkCooldownToggle = CombatTab:CreateToggle({
-    Name = "No Walk Cooldown When Shooting",
-    CurrentValue = true,
-    Flag = "NoWalkCooldownToggle",
-    Callback = function(Value)
-        noWalkCooldownEnabled = Value
-        applyGunConfig()
-        StarterGui:SetCore("SendNotification", {Title = "No Walk Cooldown When Shooting", Text = Value and "Enabled" or "Disabled", Duration = 3})
-    end,
-})
-
-local NoJumpCooldownToggle = CombatTab:CreateToggle({
-    Name = "No Jump Cooldown",
-    CurrentValue = false,
-    Flag = "NoJumpCooldownToggle",
-    Callback = function(Value)
-        noJumpCooldownEnabled = Value
-        local char = LP.Character
-        if char then
-            if noJumpCooldownEnabled then
-                applyNoJumpCooldown(char)
-            else
-                removeNoJumpCooldown(char)
-            end
-        end
-        StarterGui:SetCore("SendNotification", {Title = "No Jump Cooldown", Text = Value and "Enabled" or "Disabled", Duration = 3})
-    end,
-})
-
-local CombatSection3 = CombatTab:CreateSection("Defensive")
-
-local AntiStompToggle = CombatTab:CreateToggle({
-    Name = "Anti Stomp",
-    CurrentValue = false,
-    Flag = "AntiStompToggle",
-    Callback = function(Value)
-        antiStompEnabled = Value
-        StarterGui:SetCore("SendNotification", {Title = "Anti Stomp", Text = Value and "Enabled" or "Disabled", Duration = 3})
-    end,
-})
-
-local AntiStompKeybind = CombatTab:CreateKeybind({
-    Name = "Anti Stomp Keybind",
-    CurrentKeybind = "B",
-    HoldToInteract = false,
-    Flag = "AntiStompKeybind",
-    Callback = function(Keybind)
-        stompKey = Enum.KeyCode[Keybind]
-    end,
-})
-
-local AntiModToggle = CombatTab:CreateToggle({
-    Name = "Anti Mod",
-    CurrentValue = false,
-    Flag = "AntiModToggle",
-    Callback = function(Value)
-        antiModEnabled = Value
-        if antiModEnabled then
-            for _, player in ipairs(Players:GetPlayers()) do
-                antiMod_CheckPlayer(player)
-            end
-            antiModConnection = Players.PlayerAdded:Connect(antiMod_CheckPlayer)
-        elseif antiModConnection then
-            antiModConnection:Disconnect()
-            antiModConnection = nil
-        end
-        StarterGui:SetCore("SendNotification", {Title = "Anti Mod", Text = Value and "Enabled" or "Disabled", Duration = 3})
-    end,
-})
-
-local CombatSection4 = CombatTab:CreateSection("Target Lists")
-
-local TargetOnlyInput = CombatTab:CreateInput({
-    Name = "Add to Target Only (Kill All)",
-    PlaceholderText = "Username",
-    RemoveTextAfterFocusLost = true,
-    Callback = function(Text)
-        if Text ~= "" then
-            table.insert(targetOnlyList, Text:lower())
-            StarterGui:SetCore("SendNotification", {Title = "Target Only", Text = "Added: " .. Text, Duration = 3})
-        end
-    end,
-})
-
-local DoNotTargetInput = CombatTab:CreateInput({
-    Name = "Add to Do Not Target (Kill All)",
-    PlaceholderText = "Username",
-    RemoveTextAfterFocusLost = true,
-    Callback = function(Text)
-        if Text ~= "" then
-            table.insert(doNotTargetList, Text:lower())
-            StarterGui:SetCore("SendNotification", {Title = "Do Not Target", Text = "Added: " .. Text, Duration = 3})
-        end
-    end,
-})
-
-local WhitelistInput = CombatTab:CreateInput({
-    Name = "Add to Whitelist (Rapid Fire Protect)",
-    PlaceholderText = "Username",
-    RemoveTextAfterFocusLost = true,
-    Callback = function(Text)
-        if Text ~= "" then
-            table.insert(whitelist, Text:lower())
-            StarterGui:SetCore("SendNotification", {Title = "Whitelist", Text = "Added: " .. Text, Duration = 3})
-        end
-    end,
-})
-
-local BlacklistInput = CombatTab:CreateInput({
-    Name = "Add to Blacklist (Rapid Fire Target Only)",
-    PlaceholderText = "Username",
-    RemoveTextAfterFocusLost = true,
-    Callback = function(Text)
-        if Text ~= "" then
-            table.insert(rapidBlacklist, Text:lower())
-            StarterGui:SetCore("SendNotification", {Title = "Blacklist", Text = "Added: " .. Text, Duration = 3})
-        end
-    end,
-})
-
-local ClearListsButton = CombatTab:CreateButton({
-    Name = "Clear All Lists",
-    Callback = function()
-        targetOnlyList = {}
-        doNotTargetList = {}
-        whitelist = {}
-        rapidBlacklist = {}
-        StarterGui:SetCore("SendNotification", {Title = "Lists Cleared", Text = "All lists cleared", Duration = 3})
-    end,
-})
-
--- ==================================================
--- COMBAT LOOPS
--- ==================================================
-
--- Main Combat Loop
-RunService.RenderStepped:Connect(function(delta)
-    if not Root then return end
-
-    -- Kill All Logic
-    if killAllEnabled then
-        local livingTargets = {}
-        for _, target in ipairs(Players:GetPlayers()) do
-            if shouldTargetPlayer(target) and isAlive(target) then
-                table.insert(livingTargets, target)
-            end
-        end
-
-        if #livingTargets > 0 then
-            local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
-            if tool then
-                if not currentKillAllTarget or not isAlive(currentKillAllTarget) then
-                    currentKillAllTarget = getClosestKillAllTarget(livingTargets)
-                end
-                if currentKillAllTarget and isAlive(currentKillAllTarget) then
-                    CircleAroundTarget(currentKillAllTarget)
-                    lastFire = lastFire + delta
-                    if lastFire >= fireCooldown then
-                        lastFire = 0
-                        ForceHit(tool, currentKillAllTarget)
-                    end
-                end
-            end
-        else
-            currentKillAllTarget = nil
-            local downedTargets = {}
-            for _, target in ipairs(Players:GetPlayers()) do
-                if shouldTargetPlayer(target) and isDowned(target) and not isDead(target) then
-                    table.insert(downedTargets, target)
-                end
-            end
-            StompTarget(downedTargets)
-        end
-    end
-
-    -- Rapid Fire Logic
-    if allRapidEnabled then
-        local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
-        if tool then
-            for _, target in ipairs(Players:GetPlayers()) do
-                if target ~= LP and isAlive(target) and isFullyLoaded(target) then
-                    local nameLower = target.Name:lower()
-                    local displayLower = target.DisplayName:lower()
-                    local skip = false
-                    for _, name in ipairs(whitelist) do
-                        if nameLower:find(name) or displayLower:find(name) then
-                            skip = true
-                            break
-                        end
-                    end
-                    if not skip then
-                        if #rapidBlacklist > 0 then
-                            local isInBlacklist = false
-                            for _, name in ipairs(rapidBlacklist) do
-                                if nameLower:find(name) or displayLower:find(name) then
-                                    isInBlacklist = true
-                                    break
-                                end
-                            end
-                            if not isInBlacklist then skip = true end
-                        end
-                    end
-                    if skip then continue end
-                    if not lastFiresAll[target] then lastFiresAll[target] = 0 end
-                    lastFiresAll[target] = lastFiresAll[target] + delta
-                    if lastFiresAll[target] >= (1 / rapidFireRate) then
-                        lastFiresAll[target] = 0
-                        ShootAtTarget(tool, target)
-                    end
-                end
-            end
-        end
-    end
-end)
-
--- Bullet Rage TP Loop
-RunService.RenderStepped:Connect(function(delta)
-    if not rapidEnabled or not LP.Character then return end
-
-    local tool = LP.Character:FindFirstChildOfClass("Tool")
-    if not tool or not tool:FindFirstChild("Ammo_CLIENT") then return end
-
-    local now = time()
-    currentTarget = findClosestValidTarget()
-
-    if not currentTarget then return end
-
-    if currentTarget and not swapping and (now - lastFireTime >= FIRE_COOLDOWN) then
-        lastFireTime = now
-        
-        local targetChar = currentTarget.Character
-        if targetChar and isAlive(currentTarget) and isFullyLoaded(currentTarget) then
-            local targetPart = getTargetPart(targetChar)
-            if targetPart then
-                pcall(doBulletTP, tool, targetPart)
-            end
-        end
-
-        if not isAlive(currentTarget) then
-            currentTarget = nil
-        end
-    end
-end)
-
--- Handle Character Added
-LP.CharacterAdded:Connect(function(char)
-    Root = char:WaitForChild("HumanoidRootPart", 10)
-    if noJumpCooldownEnabled then
-        applyNoJumpCooldown(char)
-    end
-end)
-
-Players.PlayerRemoving:Connect(function(player)
-    lastFiresAll[player] = nil
-end)
-
--- Initial Setup
-if LP.Character then
-    Root = LP.Character:FindFirstChild("HumanoidRootPart")
-    if noJumpCooldownEnabled then
-        applyNoJumpCooldown(LP.Character)
-    end
-end
-
--- Key Input Handling for Combat & Desync
-UserInputService.InputBegan:Connect(function(input, gpe)
-    if gpe then return end
-    
-    -- Combat Keybinds
-    if input.KeyCode == killAllKey then
-        killAllEnabled = not killAllEnabled
-        KillAllToggle:Set(killAllEnabled)
-        StarterGui:SetCore("SendNotification", {Title = "Kill All", Text = killAllEnabled and "Enabled" or "Disabled", Duration = 3})
-    elseif input.KeyCode == allRapidKey then
-        allRapidEnabled = not allRapidEnabled
-        RapidFireToggle:Set(allRapidEnabled)
-        StarterGui:SetCore("SendNotification", {Title = "Rapid Fire All", Text = allRapidEnabled and "Enabled" or "Disabled", Duration = 3})
-    elseif input.KeyCode == stompKey then
-        antiStompEnabled = not antiStompEnabled
-        AntiStompToggle:Set(antiStompEnabled)
-        StarterGui:SetCore("SendNotification", {Title = "Anti Stomp", Text = antiStompEnabled and "Enabled" or "Disabled", Duration = 3})
-    
-    -- Desync Keybinds
-    elseif input.KeyCode == getgenv().VoidSpam.SpamKeybind then
-        local current = VoidSpamToggle:Get()
-        VoidSpamToggle:Set(not current)
-    end
-end)
-
--- ==================================================
--- INDEX-STYLE AIMBOT SECTION (ORIGINAL)
--- ==================================================
-local AimbotSection = MainTab:CreateSection("Index-Style Aimbot")
-
-local AimbotToggle = MainTab:CreateToggle({
-    Name = "Enable Index-Style Aimbot",
-    CurrentValue = false,
-    Flag = "IndexStyleAimbot",
-    Callback = function(Value)
-        Rayfield:Notify({
-            Title = "Aimbot",
-            Content = "Aimbot " .. (Value and "Enabled" or "Disabled"),
-            Duration = 2
-        })
-    end
-})
-
-local AimbotKeybind = MainTab:CreateKeybind({
-    Name = "Aimbot Keybind",
-    CurrentKeybind = "Q",
-    Flag = "IndexAimbotKey",
-    Callback = function(Key)
-        indexAimbotKey = Enum.KeyCode[Key] or Enum.KeyCode.Q
-        Rayfield:Notify({
-            Title = "Aimbot",
-            Content = "Keybind set to " .. Key,
-            Duration = 2
-        })
-    end
-})
-
-local AimbotSmoothnessSlider = MainTab:CreateSlider({
-    Name = "Smoothness",
-    Range = {1, 10},
-    Increment = 1,
-    CurrentValue = 1,
-    Flag = "IndexAimbotSmooth",
-    Callback = function(Value)
-        Rayfield:Notify({
-            Title = "Aimbot",
-            Content = "Smoothness set to " .. Value,
-            Duration = 2
-        })
-    end
-})
-
-local AimbotPredictionSlider = MainTab:CreateSlider({
-    Name = "Prediction",
-    Range = {0, 0.5},
-    Increment = 0.01,
-    CurrentValue = 0.12,
-    Flag = "IndexAimbotPred",
-    Callback = function(Value)
-        Rayfield:Notify({
-            Title = "Aimbot",
-            Content = "Prediction set to " .. Value,
-            Duration = 2
-        })
-    end
-})
-
-local AimbotTargetPartDropdown = MainTab:CreateDropdown({
-    Name = "Target Part",
-    Options = {"Head", "HumanoidRootPart", "UpperTorso", "LowerTorso"},
-    CurrentOption = {"HumanoidRootPart"},
-    Flag = "IndexAimbotPart",
-    Callback = function(Option)
-        Rayfield:Notify({
-            Title = "Aimbot",
-            Content = "Target part set to " .. Option,
-            Duration = 2
-        })
-    end
-})
-
--- ==================================================
--- SILENT AIM SECTION (ORIGINAL)
--- ==================================================
-local SilentAimSection = MainTab:CreateSection("Silent Aim")
-
-local SilentAimToggle = MainTab:CreateToggle({
-    Name = "Enable Silent Aim",
-    CurrentValue = false,
-    Flag = "SA_Enabled",
-    Callback = function(Value)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "Silent Aim " .. (Value and "Enabled" or "Disabled"),
-            Duration = 2
-        })
-    end
-})
-
-local SATypeDropdown = MainTab:CreateDropdown({
-    Name = "Type",
-    Options = {"FOV", "Target"},
-    CurrentOption = {"FOV"},
-    Flag = "SA_Type",
-    Callback = function(Option)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "Type set to " .. Option,
-            Duration = 2
-        })
-    end
-})
-
-local SAPartDropdown = MainTab:CreateDropdown({
-    Name = "Part",
-    Options = {"Head", "HumanoidRootPart", "UpperTorso", "LowerTorso"},
-    CurrentOption = {"Head"},
-    Flag = "SA_Part",
-    Callback = function(Option)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "Part set to " .. Option,
-            Duration = 2
-        })
-    end
-})
-
-local SAPredictionSlider = MainTab:CreateSlider({
-    Name = "Prediction",
-    Range = {0, 0.5},
-    Increment = 0.01,
-    CurrentValue = 0.12,
-    Flag = "SA_Pred",
-    Callback = function(Value)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "Prediction set to " .. Value,
-            Duration = 2
-        })
-    end
-})
-
-local SALockKeybind = MainTab:CreateKeybind({
-    Name = "Lock Key (for Target mode)",
-    CurrentKeybind = "G",
-    Flag = "SA_LockKey",
-    Callback = function(Key)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "Lock key set to " .. Key,
-            Duration = 2
-        })
-    end
-})
-
--- Silent Aim Visuals Sub-Section
-local SAVisualsSection = MainTab:CreateSection("Silent Aim Visuals")
-
-local SAShowFOVToggle = MainTab:CreateToggle({
-    Name = "Show FOV",
-    CurrentValue = false,
-    Flag = "SA_ShowFOV",
-    Callback = function(Value)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "Show FOV " .. (Value and "Enabled" or "Disabled"),
-            Duration = 2
-        })
-    end
-})
-
-local SAFillFOVToggle = MainTab:CreateToggle({
-    Name = "Filled FOV",
-    CurrentValue = false,
-    Flag = "SA_FillFOV",
-    Callback = function(Value)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "Filled FOV " .. (Value and "Enabled" or "Disabled"),
-            Duration = 2
-        })
-    end
-})
-
-local SAFOVRadiusSlider = MainTab:CreateSlider({
-    Name = "FOV Radius",
-    Range = {10, 600},
-    Increment = 10,
-    CurrentValue = 120,
-    Flag = "SA_FOVRad",
-    Callback = function(Value)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "FOV Radius set to " .. Value,
-            Duration = 2
-        })
-    end
-})
-
-local SAFOVThicknessSlider = MainTab:CreateSlider({
-    Name = "FOV Thickness",
-    Range = {1, 5},
-    Increment = 1,
-    CurrentValue = 2,
-    Flag = "SA_FOVThk",
-    Callback = function(Value)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "FOV Thickness set to " .. Value,
-            Duration = 2
-        })
-    end
-})
-
-local SAFOVTransparencySlider = MainTab:CreateSlider({
-    Name = "FOV Transparency",
-    Range = {0, 1},
-    Increment = 0.1,
-    CurrentValue = 1,
-    Flag = "SA_FOVAlpha",
-    Callback = function(Value)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "FOV Transparency set to " .. Value,
-            Duration = 2
-        })
-    end
-})
-
-local SAFOVColorPicker = MainTab:CreateColorPicker({
-    Name = "FOV Color",
-    Color = Color3.fromRGB(255, 255, 255),
-    Flag = "SA_FOVColor",
-    Callback = function(Color)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "FOV Color updated",
-            Duration = 2
-        })
-    end
-})
-
-local SAShowTracerToggle = MainTab:CreateToggle({
-    Name = "Show Tracer",
-    CurrentValue = false,
-    Flag = "SA_ShowTracer",
-    Callback = function(Value)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "Show Tracer " .. (Value and "Enabled" or "Disabled"),
-            Duration = 2
-        })
-    end
-})
-
-local SATracerThicknessSlider = MainTab:CreateSlider({
-    Name = "Tracer Thickness",
-    Range = {1, 5},
-    Increment = 1,
-    CurrentValue = 2,
-    Flag = "SA_TrThk",
-    Callback = function(Value)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "Tracer Thickness set to " .. Value,
-            Duration = 2
-        })
-    end
-})
-
-local SATracerTransparencySlider = MainTab:CreateSlider({
-    Name = "Tracer Transparency",
-    Range = {0, 1},
-    Increment = 0.1,
-    CurrentValue = 1,
-    Flag = "SA_TrAlpha",
-    Callback = function(Value)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "Tracer Transparency set to " .. Value,
-            Duration = 2
-        })
-    end
-})
-
-local SATracerColorPicker = MainTab:CreateColorPicker({
-    Name = "Tracer Color",
-    Color = Color3.fromRGB(255, 255, 255),
-    Flag = "SA_TrColor",
-    Callback = function(Color)
-        Rayfield:Notify({
-            Title = "Silent Aim",
-            Content = "Tracer Color updated",
-            Duration = 2
-        })
-    end
-})
-
--- Menu Section
-local UnloadButton = MenuTab:CreateButton({
-    Name = "Unload",
-    Callback = function()
-        Rayfield:Destroy()
-    end
-})
-
-local MenuKeybind = MenuTab:CreateKeybind({
-    Name = "Menu Keybind",
-    CurrentKeybind = "End",
-    Flag = "MenuKeybind",
-    Callback = function(Key)
-        local currentVisible = Rayfield:IsVisible()
-        Rayfield:SetVisibility(not currentVisible)
-    end
-})
-
--- ==================================================
--- AIMBOT LOGIC (ORIGINAL)
--- ==================================================
-local indexAimbotKey = Enum.KeyCode.Q
-local indexLockedTarget = nil
-
--- Helper function: Check if player is alive for aimbot
-local function isAliveAimbot(plr)
-    local success, result = pcall(function()
-        local c = plr and plr.Character
-        local h = c and c:FindFirstChildOfClass("Humanoid")
-        if not h or h.Health <= 0 then return false end
-        local st = c and c:FindFirstChild("State")
-        if st and st:FindFirstChild("Down") and st.Down.Value then return false end
-        if c and c:FindFirstChild("ForceField") then return false end
-        return true
-    end)
-    if not success then
-        Rayfield:Notify({
-            Title = "Aimbot Error",
-            Content = "Failed to check player status: " .. result,
-            Duration = 3
-        })
-        return false
-    end
-    return result
-end
-
--- Toggle lock / unlock by key for Aimbot
-UserInputService.InputBegan:Connect(function(input, gpe)
-    if gpe then return end
-    if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == indexAimbotKey then
-        if not AimbotToggle.CurrentValue then
-            Rayfield:Notify({
-                Title = "Aimbot",
-                Content = "Aimbot is disabled. Enable it to lock targets.",
-                Duration = 2
-            })
-            return
-        end
-
-        if not indexLockedTarget then
-            -- Acquire closest visible player
-            local best, bestDist = nil, math.huge
-            local mousePos = UserInputService:GetMouseLocation()
-            for _, plr in ipairs(Players:GetPlayers()) do
-                if plr ~= LP and isAliveAimbot(plr) and plr.Character then
-                    local partName = AimbotTargetPartDropdown.CurrentOption[1]
-                    local part = plr.Character:FindFirstChild(partName)
-                    if part then
-                        local pos, visible = Camera:WorldToViewportPoint(part.Position)
-                        if visible then
-                            local d = (Vector2.new(pos.X, pos.Y) - mousePos).Magnitude
-                            if d < bestDist then
-                                bestDist = d
-                                best = plr
-                            end
-                        end
-                    end
-                end
-            end
-            indexLockedTarget = best
-            if best then
-                Rayfield:Notify({
-                    Title = "Aimbot",
-                    Content = "Locked onto " .. best.Name,
-                    Duration = 2
-                })
-            else
-                Rayfield:Notify({
-                    Title = "Aimbot",
-                    Content = "No player found to lock",
-                    Duration = 2
-                })
-            end
-        else
-            Rayfield:Notify({
-                Title = "Aimbot",
-                Content = "Unlocked target " .. indexLockedTarget.Name,
-                Duration = 2
-            })
-            indexLockedTarget = nil
-        end
-    end
-end)
-
--- Aimbot runtime loop
-local function index_RunAimbot()
-    if not AimbotToggle.CurrentValue then return end
-    local target = indexLockedTarget
-    if not target or not isAliveAimbot(target) or not target.Character then
-        indexLockedTarget = nil
-        return
-    end
-
-    local partName = AimbotTargetPartDropdown.CurrentOption[1]
-    local part = target.Character:FindFirstChild(partName)
-    if not part then
-        Rayfield:Notify({
-            Title = "Aimbot Error",
-            Content = "Target part " .. partName .. " not found on " .. target.Name,
-            Duration = 2
-        })
-        indexLockedTarget = nil
-        return
-    end
-
-    local success, result = pcall(function()
-        local pred = AimbotPredictionSlider.CurrentValue or 0
-        local smooth = AimbotSmoothnessSlider.CurrentValue or 1
-        local endPos = part.Position + part.Velocity * pred
-        local newCF = CFrame.new(Camera.CFrame.Position, endPos)
-        Camera.CFrame = Camera.CFrame:Lerp(newCF, 1 / smooth)
-    end)
-    if not success then
-        Rayfield:Notify({
-            Title = "Aimbot Error",
-            Content = "Failed to update camera: " .. result,
-            Duration = 3
-        })
-    end
-end
-
-RunService.RenderStepped:Connect(index_RunAimbot)
-
--- ==================================================
--- SILENT AIM LOGIC (ORIGINAL)
--- ==================================================
-local saLockedTarget = nil
-
--- Drawing Objects for Silent Aim
-local saCircle = Drawing.new("Circle")
-saCircle.NumSides = 128
-saCircle.Filled = false
-saCircle.Visible = false
-
-local saTracer = Drawing.new("Line")
-saTracer.Visible = false
-
--- Cached player list for Silent Aim (shared)
-local cachedPlayers = Players:GetPlayers()
-Players.PlayerAdded:Connect(function(plr)
-    table.insert(cachedPlayers, plr)
-end)
-Players.PlayerRemoving:Connect(function(plr)
-    for i, p in ipairs(cachedPlayers) do
-        if p == plr then
-            table.remove(cachedPlayers, i)
-            break
-        end
-    end
-end)
-
--- Helper function: Check if player is valid for Silent Aim
-local function saIsValid(plr)
-    if not plr or plr == LP then return false end
-    local char = plr.Character
-    if not char then return false end
-    local h = char:FindFirstChildOfClass("Humanoid")
-    if not h or h.Health <= 0 then return false end
-    local st = char:FindFirstChild("State")
-    if st and st:FindFirstChild("Down") and st.Down.Value then return false end
-    if char:FindFirstChild("ForceField") then return false end
-    return true
-end
-
--- Get part for Silent Aim
-local function saGetPart(plr)
-    local char = plr.Character
-    if not char then return end
-    local partName = SAPartDropdown.CurrentOption[1]
-    return char:FindFirstChild(partName) or char:FindFirstChild("HumanoidRootPart")
-end
-
--- Get closest by FOV for Silent Aim
-local function saGetClosestByFOV()
-    local best, bestMag = nil, math.huge
-    local mousePos = UserInputService:GetMouseLocation()
-    for _, plr in ipairs(cachedPlayers) do
-        if saIsValid(plr) then
-            local part = saGetPart(plr)
-            if part then
-                local pos, onScreen = Camera:WorldToViewportPoint(part.Position)
-                if onScreen then
-                    local mag = (Vector2.new(pos.X, pos.Y) - mousePos).Magnitude
-                    if mag < bestMag and mag <= SAFOVRadiusSlider.CurrentValue then
-                        best, bestMag = plr, mag
-                    end
-                end
-            end
-        end
-    end
-    return best
-end
-
--- Get target for Silent Aim
-local function saGetTarget()
-    if SATypeDropdown.CurrentOption[1] == "Target" then
-        if saLockedTarget and saIsValid(saLockedTarget) then return saLockedTarget end
-        return nil
-    else
-        return saGetClosestByFOV()
-    end
-end
-
--- Get aim position for Silent Aim
-local function saGetAimPosition(plr)
-    if not plr then return nil end
-    local part = saGetPart(plr)
-    if not part then return nil end
-    local vel = part.Velocity or Vector3.zero
-    return part.Position + vel * SAPredictionSlider.CurrentValue
-end
-
--- Lock key for Target mode in Silent Aim
-UserInputService.InputBegan:Connect(function(input, gpe)
-    if gpe then return end
-    local lockKey = Enum.KeyCode[SALockKeybind.CurrentKeybind]
-    if input.KeyCode == lockKey and SilentAimToggle.CurrentValue and SATypeDropdown.CurrentOption[1] == "Target" then
-        if saLockedTarget then
-            Rayfield:Notify({
-                Title = "Silent Aim",
-                Content = "Unlocked target " .. saLockedTarget.Name,
-                Duration = 2
-            })
-            saLockedTarget = nil
-        else
-            local t = saGetClosestByFOV()
-            if t then
-                saLockedTarget = t
-                Rayfield:Notify({
-                    Title = "Silent Aim",
-                    Content = "Locked onto " .. t.Name,
-                    Duration = 2
-                })
-            else
-                Rayfield:Notify({
-                    Title = "Silent Aim",
-                    Content = "No target in FOV",
-                    Duration = 2
-                })
-            end
-        end
-    end
-end)
-
--- Mouse.Hit/Target hijack for Silent Aim
-local oldIndex
-oldIndex = hookmetamethod(game, "__index", newcclosure(function(self, key)
-    if not checkcaller() and SilentAimToggle.CurrentValue and self == Mouse then
-        if key == "Hit" then
-            local t = saGetTarget()
-            local pos = t and saGetAimPosition(t)
-            if pos then
-                return CFrame.new(pos)
-            end
-        elseif key == "Target" then
-            local t = saGetTarget()
-            local part = t and saGetPart(t)
-            if part then
-                return part
-            end
-        end
-    end
-    return oldIndex(self, key)
-end))
-
--- Optimized Visuals Loop for Silent Aim (with frame skip)
-local frameCounter = 0
-local skipFrames = 2 -- Update visuals every 2 frames
-RunService.RenderStepped:Connect(function()
-    if not SilentAimToggle.CurrentValue then
-        saCircle.Visible = false
-        saTracer.Visible = false
-        return
-    end
-
-    local mouseLoc = UserInputService:GetMouseLocation()
-    local target = saGetTarget()
-    local part = target and saGetPart(target)
-
-    frameCounter = frameCounter + 1
-    if frameCounter % skipFrames ~= 0 then return end
-
-    -- Update FOV Circle
-    if SAShowFOVToggle.CurrentValue then
-        saCircle.Position = mouseLoc
-        saCircle.Radius = SAFOVRadiusSlider.CurrentValue
-        saCircle.Thickness = SAFOVThicknessSlider.CurrentValue
-        saCircle.Transparency = SAFOVTransparencySlider.CurrentValue
-        saCircle.Filled = SAFillFOVToggle.CurrentValue
-        saCircle.Color = SAFOVColorPicker.Color
-        saCircle.Visible = true
-    else
-        saCircle.Visible = false
-    end
-
-    -- Update Tracer
-    if SAShowTracerToggle.CurrentValue and part then
-        local pos, onScreen = Camera:WorldToViewportPoint(part.Position)
-        if onScreen then
-            saTracer.From = mouseLoc
-            saTracer.To = Vector2.new(pos.X, pos.Y)
-            saTracer.Thickness = SATracerThicknessSlider.CurrentValue
-            saTracer.Transparency = SATracerTransparencySlider.CurrentValue
-            saTracer.Color = SATracerColorPicker.Color
-            saTracer.Visible = true
-        else
-            saTracer.Visible = false
-        end
-    else
-        saTracer.Visible = false
-    end
-end)
-
--- ==================================================
--- SHOP FEATURES
--- ==================================================
-
--- Shop Variables
+-- ==================== SHOP SCRIPT INTEGRATION ====================
+-- Auto Armor Variables
 local autoArmorEnabled = false
 local autoArmorOnDamage = false
 local armorCooldown = false
@@ -2300,10 +1267,269 @@ if LP.Character then
     refreshShields()
 end
 
--- Shop UI Setup
-local ShopControlsSection = ShopTab:CreateSection("Shop Controls")
+-- ==================== END SHOP SCRIPT INTEGRATION ====================
 
-local AutoArmorToggle = ShopTab:CreateToggle({
+-- Rayfield UI Setup
+local Window = Rayfield:CreateWindow({
+    Name = "Kill All & Rapid Fire System",
+    LoadingTitle = "Loading Combat Features",
+    LoadingSubtitle = "Extracted from Valyrian",
+    ConfigurationSaving = {
+        Enabled = false,
+    },
+})
+
+local Tab = Window:CreateTab("Combat", nil)
+local DesyncTab = Window:CreateTab("Desync", nil)
+local BulletTPTab = Window:CreateTab("Bullet TP", nil)
+local Shop = Window:CreateTab("Shop", nil)
+
+-- ==================================================
+-- VISUALS TAB (ESP)
+-- ==================================================
+local VisualsTab = Window:CreateTab("Visuals", nil)
+
+-- ESP Variables
+local outlines = {}
+
+local function rainbowColor() 
+    return Color3.fromHSV((tick() * 0.4) % 1, 1, 1) 
+end
+
+local function applyOpacity(alpha)
+    for _, d in pairs(outlines) do
+        if d.box then 
+            d.box.Transparency = alpha 
+        end
+        if d.username then
+            local lbl = d.username:FindFirstChildWhichIsA("TextLabel")
+            if lbl then 
+                lbl.TextStrokeTransparency = 1 - alpha 
+            end
+        end
+    end
+end
+
+local function createOutline(char)
+    if not char or outlines[char] then return end
+    local root = char:FindFirstChild("HumanoidRootPart") or char:WaitForChild("HumanoidRootPart", 5)
+    if not root then return end
+
+    local box = Instance.new("BoxHandleAdornment")
+    box.Adornee = root
+    box.AlwaysOnTop = true
+    box.ZIndex = 10
+    box.Size = root.Size + Vector3.new(3, 5, 3)
+    box.Transparency = 0.3
+    box.Color3 = Color3.fromRGB(0, 255, 0)
+    box.Parent = Camera
+
+    -- username text
+    local p = Players:GetPlayerFromCharacter(char)
+    local bb = nil
+    if p then
+        bb = Instance.new("BillboardGui")
+        bb.Adornee = root
+        bb.AlwaysOnTop = true
+        bb.Size = UDim2.new(0, 200, 0, 40)
+        bb.StudsOffset = Vector3.new(0, 4, 0)
+        bb.Parent = Camera
+
+        local txt = Instance.new("TextLabel", bb)
+        txt.Size = UDim2.new(1, 0, 1, 0)
+        txt.BackgroundTransparency = 1
+        txt.Font = Enum.Font.SourceSansBold
+        txt.TextStrokeTransparency = 0
+        txt.TextStrokeColor3 = Color3.new(0, 0, 0)
+        txt.TextSize = 14
+        txt.Text = p.DisplayName .. " (@" .. p.Name .. ")"
+        txt.TextColor3 = Color3.fromRGB(0, 255, 0)
+    end
+
+    outlines[char] = {box = box, username = bb}
+    char.AncestryChanged:Connect(function(_, parent)
+        if not parent and outlines[char] then
+            if outlines[char].box then 
+                outlines[char].box:Destroy() 
+            end
+            if outlines[char].username then 
+                outlines[char].username:Destroy() 
+            end
+            outlines[char] = nil
+        end
+    end)
+end
+
+local function removeOutline(char)
+    if outlines[char] then
+        if outlines[char].box then 
+            outlines[char].box:Destroy() 
+        end
+        if outlines[char].username then 
+            outlines[char].username:Destroy() 
+        end
+        outlines[char] = nil
+    end
+end
+
+local function addChar(char) 
+    createOutline(char) 
+end
+
+local function track(p)
+    if p == LP then return end
+    p.CharacterAdded:Connect(addChar)
+    p.CharacterRemoving:Connect(removeOutline)
+    if p.Character then 
+        task.delay(1, function() 
+            addChar(p.Character) 
+        end) 
+    end
+end
+
+-- Initialize ESP tracking
+for _, p in ipairs(Players:GetPlayers()) do 
+    track(p) 
+end
+Players.PlayerAdded:Connect(track)
+Players.PlayerRemoving:Connect(function(p) 
+    if p.Character then 
+        removeOutline(p.Character) 
+    end 
+end)
+
+-- ESP Settings
+local ESPSettings = {
+    Enabled = false,
+    Rainbow = false,
+    ShowUser = true,
+    Opacity = 0.3,
+    Color = Color3.fromRGB(0, 255, 0)
+}
+
+-- ESP Loop
+RunService.Heartbeat:Connect(function()
+    if not ESPSettings.Enabled then
+        for _, d in pairs(outlines) do
+            if d.box then 
+                d.box.Visible = false 
+            end
+            if d.username then 
+                d.username.Enabled = false 
+            end
+        end
+        return
+    end
+    
+    local col = ESPSettings.Rainbow and rainbowColor() or ESPSettings.Color
+    local alp = ESPSettings.Opacity
+    
+    for c, d in pairs(outlines) do
+        if not c:IsDescendantOf(workspace) then
+            removeOutline(c)
+        else
+            if d.box then
+                d.box.Visible = true
+                d.box.Color3 = col
+                d.box.Transparency = alp
+            end
+            if d.username then
+                d.username.Enabled = ESPSettings.ShowUser
+                local txt = d.username:FindFirstChildWhichIsA("TextLabel")
+                if txt then 
+                    txt.TextColor3 = col 
+                    txt.TextStrokeTransparency = 1 - alp 
+                end
+            end
+        end
+    end
+end)
+
+-- ESP UI Elements
+local ESPGroup = VisualsTab:CreateSection("Outline ESP")
+
+local ESPToggle = VisualsTab:CreateToggle({
+    Name = "Enable ESP",
+    CurrentValue = false,
+    Flag = "ESPToggle",
+    Callback = function(Value)
+        ESPSettings.Enabled = Value
+        StarterGui:SetCore("SendNotification", {
+            Title = "ESP", 
+            Text = Value and "Enabled" or "Disabled", 
+            Duration = 3
+        })
+    end,
+})
+
+local ESPRainbowToggle = VisualsTab:CreateToggle({
+    Name = "Rainbow Color",
+    CurrentValue = false,
+    Flag = "ESPRainbowToggle",
+    Callback = function(Value)
+        ESPSettings.Rainbow = Value
+    end,
+})
+
+local ESPShowUserToggle = VisualsTab:CreateToggle({
+    Name = "Show Usernames",
+    CurrentValue = true,
+    Flag = "ESPShowUserToggle",
+    Callback = function(Value)
+        ESPSettings.ShowUser = Value
+    end,
+})
+
+local ESPOpacitySlider = VisualsTab:CreateSlider({
+    Name = "Opacity",
+    Range = {0, 1},
+    Increment = 0.05,
+    Suffix = "",
+    CurrentValue = 0.3,
+    Flag = "ESPOpacitySlider",
+    Callback = function(Value)
+        ESPSettings.Opacity = Value
+        applyOpacity(Value)
+    end,
+})
+
+local ESPColorPicker = VisualsTab:CreateColorPicker({
+    Name = "ESP Color",
+    Color = Color3.fromRGB(0, 255, 0),
+    Flag = "ESPColorPicker",
+    Callback = function(Value)
+        ESPSettings.Color = Value
+        for _, d in pairs(outlines) do
+            if d.box then 
+                d.box.Color3 = Value 
+            end
+        end
+    end,
+})
+
+-- Initialize ESP for current players
+task.spawn(function()
+    task.wait(2)
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LP and player.Character then
+            createOutline(player.Character)
+        end
+    end
+end)
+
+-- Clean up ESP when character is removed
+LP.CharacterRemoving:Connect(function()
+    for char, _ in pairs(outlines) do
+        removeOutline(char)
+    end
+end)
+
+-- ==================================================
+-- SHOP TAB UI
+-- ==================================================
+local ShopControlsSection = Shop:CreateSection("Shop Controls")
+
+local AutoArmorToggle = Shop:CreateToggle({
     Name = "Auto Re-Armor on Respawn",
     CurrentValue = false,
     Flag = "AutoArmorToggle",
@@ -2313,7 +1539,7 @@ local AutoArmorToggle = ShopTab:CreateToggle({
     end,
 })
 
-local AutoArmorDamageToggle = ShopTab:CreateToggle({
+local AutoArmorDamageToggle = Shop:CreateToggle({
     Name = "Auto Armor on Low Health",
     CurrentValue = false,
     Flag = "AutoArmorDamageToggle",
@@ -2323,7 +1549,7 @@ local AutoArmorDamageToggle = ShopTab:CreateToggle({
     end,
 })
 
-local ShopHealthThresholdSlider = ShopTab:CreateSlider({
+local ShopHealthThresholdSlider = Shop:CreateSlider({
     Name = "Health % for Auto Armor",
     Range = {10, 90},
     Increment = 1,
@@ -2335,7 +1561,7 @@ local ShopHealthThresholdSlider = ShopTab:CreateSlider({
     end,
 })
 
-local DefaultArmorDropdown = ShopTab:CreateDropdown({
+local DefaultArmorDropdown = Shop:CreateDropdown({
     Name = "Default Auto Armor",
     Options = shieldKeys,
     CurrentOption = {"High medium shield 3"},
@@ -2345,10 +1571,10 @@ local DefaultArmorDropdown = ShopTab:CreateDropdown({
     end,
 })
 
-local ShieldsSection = ShopTab:CreateSection("Shields")
+local ShieldsSection = Shop:CreateSection("Shields")
 
 for _, shieldName in ipairs(shieldKeys) do
-    ShopTab:CreateButton({
+    Shop:CreateButton({
         Name = shieldName,
         Callback = function()
             teleportAndPurchaseItem(shieldName)
@@ -2356,10 +1582,10 @@ for _, shieldName in ipairs(shieldKeys) do
     })
 end
 
-local FoodSection = ShopTab:CreateSection("Food Section")
+local FoodSection = Shop:CreateSection("Food Section")
 
 for _, foodName in ipairs(foodKeys) do
-    ShopTab:CreateButton({
+    Shop:CreateButton({
         Name = foodName,
         Callback = function()
             teleportAndPurchaseItem(foodName)
@@ -2367,7 +1593,7 @@ for _, foodName in ipairs(foodKeys) do
     })
 end
 
-local AutoRefreshToggle = ShopTab:CreateToggle({
+local AutoRefreshToggle = Shop:CreateToggle({
     Name = "Auto Refresh Shop Locations",
     CurrentValue = false,
     Flag = "AutoRefreshToggle",
@@ -2386,8 +1612,688 @@ local AutoRefreshToggle = ShopTab:CreateToggle({
     end,
 })
 
--- Handle Character Added for Auto Armor on Respawn
+-- ==================================================
+-- BULLET TP TAB UI
+-- ==================================================
+local BTPMainGroup = BulletTPTab:CreateSection("Bullet TP Main")
+
+local BTPToggle = BulletTPTab:CreateToggle({
+    Name = "Enable Bullet TP",
+    CurrentValue = false,
+    Flag = "BTPToggle",
+    Callback = function(Value)
+        getgenv().BTP.Enabled = Value
+        BTP_notify("Bullet TP: " .. (Value and "ON" or "OFF"))
+    end,
+})
+
+local BTPKeybind = BulletTPTab:CreateKeybind({
+    Name = "Bullet TP Toggle Key",
+    CurrentKeybind = "T",
+    HoldToInteract = false,
+    Flag = "BTPKeybind",
+    Callback = function(Keybind)
+        local current = BTPToggle:Get()
+        BTPToggle:Set(not current)
+    end,
+})
+
+local BTPConfigGroup = BulletTPTab:CreateSection("Bullet TP Configuration")
+
+local BTPModeDropdown = BulletTPTab:CreateDropdown({
+    Name = "Targeting Mode",
+    Options = {"FOV", "Target"},
+    CurrentOption = "FOV",
+    Flag = "BTPModeDropdown",
+    Callback = function(Option)
+        getgenv().BTP.Mode = Option[1]
+    end,
+})
+
+local BTPPartDropdown = BulletTPTab:CreateDropdown({
+    Name = "Target Part",
+    Options = {"Head", "UpperTorso", "LowerTorso", "HumanoidRootPart"},
+    CurrentOption = "UpperTorso",
+    Flag = "BTPPartDropdown",
+    Callback = function(Option)
+        getgenv().BTP.Part = Option[1]
+    end,
+})
+
+local BTPPredictionSlider = BulletTPTab:CreateSlider({
+    Name = "Prediction",
+    Range = {0, 0.5},
+    Increment = 0.01,
+    Suffix = "s",
+    CurrentValue = 0.14,
+    Flag = "BTPPredictionSlider",
+    Callback = function(Value)
+        getgenv().BTP.Prediction = Value
+    end,
+})
+
+local BTPFOVSlider = BulletTPTab:CreateSlider({
+    Name = "FOV Radius",
+    Range = {10, 600},
+    Increment = 1,
+    Suffix = "",
+    CurrentValue = 150,
+    Flag = "BTPFOVSlider",
+    Callback = function(Value)
+        getgenv().BTP.FOV = Value
+    end,
+})
+
+local BTPVisualsGroup = BulletTPTab:CreateSection("Bullet TP Visuals")
+
+local BTPShowFOVToggle = BulletTPTab:CreateToggle({
+    Name = "Show FOV Circle",
+    CurrentValue = false,
+    Flag = "BTPShowFOVToggle",
+    Callback = function(Value)
+        getgenv().BTP.ShowFOV = Value
+    end,
+})
+
+local BTPShowTracerToggle = BulletTPTab:CreateToggle({
+    Name = "Show Tracer",
+    CurrentValue = false,
+    Flag = "BTPShowTracerToggle",
+    Callback = function(Value)
+        getgenv().BTP.ShowTracer = Value
+    end,
+})
+
+local BTPClosestPartToggle = BulletTPTab:CreateToggle({
+    Name = "Closest Part Targeting",
+    CurrentValue = false,
+    Flag = "BTPClosestPartToggle",
+    Callback = function(Value)
+        getgenv().BTP.ClosestPart = Value
+    end,
+})
+
+-- ==================================================
+-- BULLET RAGE TP UI (KILL ALL STYLE)
+-- ==================================================
+local BulletRageGroup = BulletTPTab:CreateSection("Bullet Rage TP (Kill All)")
+
+local BulletRageToggle = BulletTPTab:CreateToggle({
+    Name = "Enable Bullet Rage TP",
+    CurrentValue = false,
+    Flag = "BulletRageToggle",
+    Callback = function(Value)
+        rapidEnabled = Value -- Directly control the 'rapidEnabled' state
+        BTP_notify("Bullet Rage: " .. (Value and "ON" or "OFF"))
+    end,
+})
+
+local BulletRageKeybind = BulletTPTab:CreateKeybind({
+    Name = "Bullet Rage Toggle Key",
+    CurrentKeybind = "V",
+    HoldToInteract = false,
+    Flag = "BulletRageKeybind",
+    Callback = function(Keybind)
+        -- The keybind will now just mirror the toggle's action
+        BulletRageToggle:Set(not BulletRageToggle:Get())
+    end,
+})
+
+local BulletRagePredictionSlider = BulletTPTab:CreateSlider({
+    Name = "Rage Prediction",
+    Range = {0, 0.5},
+    Increment = 0.01,
+    Suffix = "s",
+    CurrentValue = 0.14,
+    Flag = "BulletRagePredictionSlider",
+    Callback = function(Value)
+        getgenv().BulletRageTP.Prediction = Value
+    end,
+})
+
+local BulletRageClosestPartToggle = BulletTPTab:CreateToggle({
+    Name = "Rage Closest Part",
+    CurrentValue = false,
+    Flag = "BulletRageClosestPartToggle",
+    Callback = function(Value)
+        getgenv().BulletRageTP.ClosestPart = Value
+    end,
+})
+
+local BulletRageFireRateSlider = BulletTPTab:CreateSlider({
+    Name = "Rage Fire Rate",
+    Range = {0.05, 1.0},
+    Increment = 0.01,
+    Suffix = "s",
+    CurrentValue = 0.22,
+    Flag = "BulletRageFireRateSlider",
+    Callback = function(Value)
+        FIRE_COOLDOWN = Value
+    end,
+})
+
+-- Combat Tab Elements
+local KillAllToggle = Tab:CreateToggle({
+    Name = "Kill All",
+    CurrentValue = false,
+    Flag = "KillAllToggle",
+    Callback = function(Value)
+        killAllEnabled = Value
+        StarterGui:SetCore("SendNotification", {Title = "Kill All", Text = Value and "Enabled" or "Disabled", Duration = 3})
+    end,
+})
+
+local KillAllKeybind = Tab:CreateKeybind({
+    Name = "Kill All Keybind",
+    CurrentKeybind = "C",
+    HoldToInteract = false,
+    Flag = "KillAllKeybind",
+    Callback = function(Keybind)
+        killAllKey = Enum.KeyCode[Keybind]
+    end,
+})
+
+local RapidFireToggle = Tab:CreateToggle({
+    Name = "Rapid Fire All",
+    CurrentValue = false,
+    Flag = "RapidFireToggle",
+    Callback = function(Value)
+        allRapidEnabled = Value
+        StarterGui:SetCore("SendNotification", {Title = "Rapid Fire All", Text = Value and "Enabled" or "Disabled", Duration = 3})
+    end,
+})
+
+local RapidFireKeybind = Tab:CreateKeybind({
+    Name = "Rapid Fire All Keybind",
+    CurrentKeybind = "V",
+    HoldToInteract = false,
+    Flag = "RapidFireKeybind",
+    Callback = function(Keybind)
+        allRapidKey = Enum.KeyCode[Keybind]
+    end,
+})
+
+local AntiStompToggle = Tab:CreateToggle({
+    Name = "Anti Stomp",
+    CurrentValue = false,
+    Flag = "AntiStompToggle",
+    Callback = function(Value)
+        antiStompEnabled = Value
+        StarterGui:SetCore("SendNotification", {Title = "Anti Stomp", Text = Value and "Enabled" or "Disabled", Duration = 3})
+    end,
+})
+
+local AntiStompKeybind = Tab:CreateKeybind({
+    Name = "Anti Stomp Keybind",
+    CurrentKeybind = "B",
+    HoldToInteract = false,
+    Flag = "AntiStompKeybind",
+    Callback = function(Keybind)
+        stompKey = Enum.KeyCode[Keybind]
+    end,
+})
+
+local InfAmmoToggle = Tab:CreateToggle({
+    Name = "Inf Ammo",
+    CurrentValue = false,
+    Flag = "InfAmmoToggle",
+    Callback = function(Value)
+        if Value then
+            enableInfAmmo()
+            StarterGui:SetCore("SendNotification", {Title = "Inf Ammo", Text = "Enabled", Duration = 3})
+        else
+            disableInfAmmo()
+            StarterGui:SetCore("SendNotification", {Title = "Inf Ammo", Text = "Disabled", Duration = 3})
+        end
+    end,
+})
+
+local NoShootingCooldownToggle = Tab:CreateToggle({
+    Name = "No Shooting Cooldown",
+    CurrentValue = true,
+    Flag = "NoShootingCooldownToggle",
+    Callback = function(Value)
+        noShootingCooldownEnabled = Value
+        applyGunConfig()
+        StarterGui:SetCore("SendNotification", {Title = "No Shooting Cooldown", Text = Value and "Enabled" or "Disabled", Duration = 3})
+    end,
+})
+
+local NoWalkCooldownToggle = Tab:CreateToggle({
+    Name = "No Walk Cooldown When Shooting",
+    CurrentValue = true,
+    Flag = "NoWalkCooldownToggle",
+    Callback = function(Value)
+        noWalkCooldownEnabled = Value
+        applyGunConfig()
+        StarterGui:SetCore("SendNotification", {Title = "No Walk Cooldown When Shooting", Text = Value and "Enabled" or "Disabled", Duration = 3})
+    end,
+})
+
+local NoJumpCooldownToggle = Tab:CreateToggle({
+    Name = "No Jump Cooldown",
+    CurrentValue = false,
+    Flag = "NoJumpCooldownToggle",
+    Callback = function(Value)
+        noJumpCooldownEnabled = Value
+        local char = LP.Character
+        if char then
+            if noJumpCooldownEnabled then
+                applyNoJumpCooldown(char)
+            else
+                removeNoJumpCooldown(char)
+            end
+        end
+        StarterGui:SetCore("SendNotification", {Title = "No Jump Cooldown", Text = Value and "Enabled" or "Disabled", Duration = 3})
+    end,
+})
+
+local AntiModToggle = Tab:CreateToggle({
+    Name = "Anti Mod",
+    CurrentValue = false,
+    Flag = "AntiModToggle",
+    Callback = function(Value)
+        antiModEnabled = Value
+        if antiModEnabled then
+            -- Immediately check all players currently in the server
+            for _, player in ipairs(Players:GetPlayers()) do
+                antiMod_CheckPlayer(player)
+            end
+            -- Connect the event to watch for new players joining
+            antiModConnection = Players.PlayerAdded:Connect(antiMod_CheckPlayer)
+        elseif antiModConnection then
+            antiModConnection:Disconnect()
+            antiModConnection = nil
+        end
+        StarterGui:SetCore("SendNotification", {Title = "Anti Mod", Text = Value and "Enabled" or "Disabled", Duration = 3})
+    end,
+})
+
+local FireRateSlider = Tab:CreateSlider({
+    Name = "Fire Rate (shots/sec)",
+    Range = {1, 60},
+    Increment = 1,
+    Suffix = "",
+    CurrentValue = 20,
+    Flag = "FireRateSlider",
+    Callback = function(Value)
+        rapidFireRate = Value
+        fireCooldown = 1 / Value
+    end,
+})
+
+local KillAllFireRateSlider = Tab:CreateSlider({
+    Name = "Kill All Fire Rate",
+    Range = {0.01, 0.5},
+    Increment = 0.01,
+    Suffix = "s",
+    CurrentValue = 0.05,
+    Flag = "KillAllFireRateSlider",
+    Callback = function(Value)
+        fireCooldown = Value
+    end,
+})
+
+local CircleRadiusSlider = Tab:CreateSlider({
+    Name = "Circle Radius",
+    Range = {5, 50},
+    Increment = 1,
+    Suffix = "studs",
+    CurrentValue = 10,
+    Flag = "CircleRadiusSlider",
+    Callback = function(Value)
+        radius = Value
+    end,
+})
+
+local CircleSpeedSlider = Tab:CreateSlider({
+    Name = "Circle Speed",
+    Range = {0.01, 1},
+    Increment = 0.01,
+    Suffix = "",
+    CurrentValue = 0.1,
+    Flag = "CircleSpeedSlider",
+    Callback = function(Value)
+        speed = Value
+    end,
+})
+
+-- Input for Target Only List (for Kill All)
+local TargetOnlyInput = Tab:CreateInput({
+    Name = "Add to Target Only (Kill All)",
+    PlaceholderText = "Username",
+    RemoveTextAfterFocusLost = true,
+    Callback = function(Text)
+        if Text ~= "" then
+            table.insert(targetOnlyList, Text:lower())
+            StarterGui:SetCore("SendNotification", {Title = "Target Only", Text = "Added: " .. Text, Duration = 3})
+        end
+    end,
+})
+
+-- Input for Do Not Target List (for Kill All)
+local DoNotTargetInput = Tab:CreateInput({
+    Name = "Add to Do Not Target (Kill All)",
+    PlaceholderText = "Username",
+    RemoveTextAfterFocusLost = true,
+    Callback = function(Text)
+        if Text ~= "" then
+            table.insert(doNotTargetList, Text:lower())
+            StarterGui:SetCore("SendNotification", {Title = "Do Not Target", Text = "Added: " .. Text, Duration = 3})
+        end
+    end,
+})
+
+-- Input for Whitelist (Rapid Fire - protect)
+local WhitelistInput = Tab:CreateInput({
+    Name = "Add to Whitelist (Rapid Fire Protect)",
+    PlaceholderText = "Username",
+    RemoveTextAfterFocusLost = true,
+    Callback = function(Text)
+        if Text ~= "" then
+            table.insert(whitelist, Text:lower())
+            StarterGui:SetCore("SendNotification", {Title = "Whitelist", Text = "Added: " .. Text, Duration = 3})
+        end
+    end,
+})
+
+-- Input for Blacklist (Rapid Fire - target only if populated)
+local BlacklistInput = Tab:CreateInput({
+    Name = "Add to Blacklist (Rapid Fire Target Only)",
+    PlaceholderText = "Username",
+    RemoveTextAfterFocusLost = true,
+    Callback = function(Text)
+        if Text ~= "" then
+            table.insert(rapidBlacklist, Text:lower())
+            StarterGui:SetCore("SendNotification", {Title = "Blacklist", Text = "Added: " .. Text, Duration = 3})
+        end
+    end,
+})
+
+local ClearListsButton = Tab:CreateButton({
+    Name = "Clear All Lists",
+    Callback = function()
+        targetOnlyList = {}
+        doNotTargetList = {}
+        whitelist = {}
+        rapidBlacklist = {}
+        StarterGui:SetCore("SendNotification", {Title = "Lists Cleared", Text = "All lists cleared", Duration = 3})
+    end,
+})
+
+-- Desync Tab Elements
+local DesyncSection = DesyncTab:CreateSection("Standard Desync")
+
+local DesyncToggle = DesyncTab:CreateToggle({
+    Name = "Desync",
+    CurrentValue = false,
+    Flag = "DesyncToggle",
+    Callback = function(Value)
+        getgenv().Desync.Enabled = Value
+        StarterGui:SetCore("SendNotification", {Title = "Desync", Text = Value and "Enabled" or "Disabled", Duration = 3})
+    end,
+})
+
+local DesyncKeybind = DesyncTab:CreateKeybind({
+    Name = "Desync Keybind",
+    CurrentKeybind = "Z",
+    HoldToInteract = false,
+    Flag = "DesyncKeybind",
+    Callback = function(Keybind)
+        -- Toggle desync on keybind
+        local current = DesyncToggle:Get()
+        DesyncToggle:Set(not current)
+    end,
+})
+
+local DesyncMethodDropdown = DesyncTab:CreateDropdown({
+    Name = "Desync Method",
+    Options = {"Void", "Sky", "Underground", "Random", "Oscillate", "Spin"},
+    CurrentOption = "Void",
+    Flag = "DesyncMethodDropdown",
+    Callback = function(Option)
+        getgenv().Desync.Method = Option[1]
+    end,
+})
+
+-- Auto Desync on Damage Toggle
+local AutoDesyncToggle = DesyncTab:CreateToggle({
+    Name = "Auto Desync on Damage",
+    CurrentValue = true,
+    Flag = "AutoDesyncToggle",
+    Callback = function(Value)
+        getgenv().Desync.AutoDesyncOnDamage = Value
+    end,
+})
+
+-- Health Threshold Slider
+local DesyncHealthThresholdSlider = DesyncTab:CreateSlider({
+    Name = "Health Threshold (%)",
+    Range = {1, 100},
+    Increment = 1,
+    Suffix = "%",
+    CurrentValue = 90,
+    Flag = "DesyncHealthThresholdSlider",
+    Callback = function(Value)
+        getgenv().Desync.HealthThreshold = Value
+    end,
+})
+
+-- Cooldown Slider
+local DesyncCooldownSlider = DesyncTab:CreateSlider({
+    Name = "Desync Cooldown (s)",
+    Range = {0.1, 5},
+    Increment = 0.1,
+    Suffix = "s",
+    CurrentValue = 1,
+    Flag = "DesyncCooldownSlider",
+    Callback = function(Value)
+        getgenv().Desync.Cooldown = Value
+    end,
+})
+
+-- Void Spam Section
+local VoidSpamSection = DesyncTab:CreateSection("Void Spam Desync")
+
+local VoidSpamToggle = DesyncTab:CreateToggle({
+    Name = "Void Spam",
+    CurrentValue = false,
+    Flag = "VoidSpamToggle",
+    Callback = function(Value)
+        getgenv().VoidSpam.Enabled = Value
+        if not getgenv().VoidSpam.Enabled then
+            ShouldInVoid = false
+        end
+        StarterGui:SetCore("SendNotification", {
+            Title = "Void Spam", 
+            Text = Value and "Enabled" or "Disabled", 
+            Duration = 3
+        })
+    end,
+})
+
+local VoidSpamKeybind = DesyncTab:CreateKeybind({
+    Name = "Void Spam Keybind",
+    CurrentKeybind = "X",
+    HoldToInteract = false,
+    Flag = "VoidSpamKeybind",
+    Callback = function(Keybind)
+        getgenv().VoidSpam.SpamKeybind = Enum.KeyCode[Keybind]
+        -- Toggle void spam on keybind press
+        local current = VoidSpamToggle:Get()
+        VoidSpamToggle:Set(not current)
+    end,
+})
+
+local VoidSpamMethodDropdown = DesyncTab:CreateDropdown({
+    Name = "Void Spam Method",
+    Options = {"Void", "Underworld", "Random", "Sky", "Nan"},
+    CurrentOption = "Void",
+    Flag = "VoidSpamMethodDropdown",
+    Callback = function(Option)
+        getgenv().VoidSpam.Method = Option[1]
+    end,
+})
+
+local VoidBreakVelocityToggle = DesyncTab:CreateToggle({
+    Name = "Break Velocity (Void Spam)",
+    CurrentValue = false,
+    Flag = "VoidBreakVelocityToggle",
+    Callback = function(Value)
+        getgenv().VoidSpam.BreakVelocity = Value
+        StarterGui:SetCore("SendNotification", {
+            Title = "Void Break Velocity", 
+            Text = Value and "Enabled" or "Disabled", 
+            Duration = 3
+        })
+    end,
+})
+
+local VoidBreakVelocityKeybind = DesyncTab:CreateKeybind({
+    Name = "Break Velocity Keybind",
+    CurrentKeybind = "N",
+    HoldToInteract = false,
+    Flag = "VoidBreakVelocityKeybind",
+    Callback = function(Keybind)
+        -- Toggle break velocity on keybind
+        local current = VoidBreakVelocityToggle:Get()
+        VoidBreakVelocityToggle:Set(not current)
+    end,
+})
+
+-- Key Input Handling
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    
+    -- Combat Keybinds
+    if input.KeyCode == killAllKey then
+        killAllEnabled = not killAllEnabled
+        KillAllToggle:Set(killAllEnabled)
+        StarterGui:SetCore("SendNotification", {Title = "Kill All", Text = killAllEnabled and "Enabled" or "Disabled", Duration = 3})
+    elseif input.KeyCode == allRapidKey then
+        allRapidEnabled = not allRapidEnabled
+        RapidFireToggle:Set(allRapidEnabled)
+        StarterGui:SetCore("SendNotification", {Title = "Rapid Fire All", Text = allRapidEnabled and "Enabled" or "Disabled", Duration = 3})
+    elseif input.KeyCode == stompKey then
+        antiStompEnabled = not antiStompEnabled
+        AntiStompToggle:Set(antiStompEnabled)
+        StarterGui:SetCore("SendNotification", {Title = "Anti Stomp", Text = antiStompEnabled and "Enabled" or "Disabled", Duration = 3})
+    
+    -- Desync Keybinds
+    elseif input.KeyCode == getgenv().VoidSpam.SpamKeybind then
+        local current = VoidSpamToggle:Get()
+        VoidSpamToggle:Set(not current)
+    
+    -- Bullet TP Keybinds
+    elseif input.KeyCode == Enum.KeyCode.T then
+        local current = BTPToggle:Get()
+        BTPToggle:Set(not current)
+    elseif input.KeyCode == Enum.KeyCode.V then
+        BulletRageToggle:Set(not BulletRageToggle:Get())
+    end
+end)
+
+-- Main Combat Loop
+RunService.RenderStepped:Connect(function(delta)
+    if not Root then return end
+
+    -- Kill All Logic
+    if killAllEnabled then
+        local livingTargets = {}
+        for _, target in ipairs(Players:GetPlayers()) do
+            if shouldTargetPlayer(target) and isAlive(target) then
+                table.insert(livingTargets, target)
+            end
+        end
+
+        if #livingTargets > 0 then
+            local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
+            if tool then
+                if not currentKillAllTarget or not isAlive(currentKillAllTarget) then
+                    currentKillAllTarget = getClosestKillAllTarget(livingTargets)
+                end
+                if currentKillAllTarget and isAlive(currentKillAllTarget) then
+                    CircleAroundTarget(currentKillAllTarget)
+                    lastFire = lastFire + delta
+                    if lastFire >= fireCooldown then
+                        lastFire = 0
+                        ForceHit(tool, currentKillAllTarget)
+                    end
+                end
+            end
+        else
+            currentKillAllTarget = nil
+            local downedTargets = {}
+            for _, target in ipairs(Players:GetPlayers()) do
+                if shouldTargetPlayer(target) and isDowned(target) and not isDead(target) then
+                    table.insert(downedTargets, target)
+                end
+            end
+            StompTarget(downedTargets)
+        end
+    end
+
+    -- Rapid Fire Logic
+    if allRapidEnabled then
+        local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
+        if tool then
+            for _, target in ipairs(Players:GetPlayers()) do
+                if target ~= LP and isAlive(target) and isFullyLoaded(target) then
+                    local nameLower = target.Name:lower()
+                    local displayLower = target.DisplayName:lower()
+                    local skip = false
+                    for _, name in ipairs(whitelist) do
+                        if nameLower:find(name) or displayLower:find(name) then
+                            skip = true
+                            break
+                        end
+                    end
+                    if not skip then
+                        if #rapidBlacklist > 0 then
+                            local isInBlacklist = false
+                            for _, name in ipairs(rapidBlacklist) do
+                                if nameLower:find(name) or displayLower:find(name) then
+                                    isInBlacklist = true
+                                    break
+                                end
+                            end
+                            if not isInBlacklist then skip = true end
+                        end
+                    end
+                    if skip then continue end
+                    if not lastFiresAll[target] then lastFiresAll[target] = 0 end
+                    lastFiresAll[target] = lastFiresAll[target] + delta
+                    if lastFiresAll[target] >= (1 / rapidFireRate) then
+                        lastFiresAll[target] = 0
+                        ShootAtTarget(tool, target)
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- Anti Stomp Loop
+coroutine.wrap(function()
+    while true do
+        task.wait()
+        if antiStompEnabled or autoAntiStomp or lagAntiStomp then
+            local LocalCharacter = LP.Character
+            local LocalRoot = LocalCharacter and LocalCharacter:FindFirstChild("HumanoidRootPart")
+            if LocalRoot then
+                local OldVelocity = LocalRoot.AssemblyLinearVelocity
+                LocalRoot.AssemblyLinearVelocity = Vector3.new(0, -9e10, 0)
+                RunService.RenderStepped:Wait()
+                LocalRoot.AssemblyLinearVelocity = OldVelocity
+            end
+        end
+        RunService.Heartbeat:Wait()
+    end
+end)()
+
+-- Handle Character Added
 LP.CharacterAdded:Connect(function(char)
+    Root = char:WaitForChild("HumanoidRootPart", 10)
     task.wait(2)
     refreshShields()
     
@@ -2395,18 +2301,30 @@ LP.CharacterAdded:Connect(function(char)
         task.wait(2)
         purchaseArmor()
     end
+    if noJumpCooldownEnabled then
+        applyNoJumpCooldown(char)
+    end
+    -- Initialize BTP for new character
+    BTP_scan(char)
 end)
 
--- Initial notification
-Rayfield:Notify({
-    Title = "Complete System Loaded",
-    Content = "Aimbot, Silent Aim, Combat & Desync Features Loaded",
-    Duration = 5
-})
+Players.PlayerRemoving:Connect(function(player)
+    lastFiresAll[player] = nil
+end)
+
+-- Initial No Jump Cooldown check
+if LP.Character and noJumpCooldownEnabled then
+    applyNoJumpCooldown(LP.Character)
+end
+
+-- Initialize BTP for current character
+if LP.Character then
+    BTP_scan(LP.Character)
+end
 
 Rayfield:Notify({
-   Title = "Valyrian Standalone Shop Loaded",
-   Content = "Shop features including auto armor, manual purchases, and auto refresh are ready.",
+   Title = "Valyrian Combat & Desync System Loaded",
+   Content = "Kill All, Rapid Fire, Desync, Bullet TP, Shop, and Visuals (ESP) systems integrated.",
    Duration = 5,
    Image = 4483362458,
    Actions = {},
